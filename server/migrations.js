@@ -1051,6 +1051,33 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-09-25-saivaree-kol-meta',
+    description: 'Saivaree creator mapping and clinic metadata',
+    up: async ({ exec }) => {
+      await exec(`
+        CREATE TABLE IF NOT EXISTS saivaree_kol_meta (
+          workspace_id TEXT NOT NULL,
+          kol_database_id TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          username TEXT NOT NULL,
+          saivaree_creator_id TEXT,
+          clinic_status TEXT NOT NULL DEFAULT 'watching',
+          clinic_rating INTEGER,
+          clinic_notes TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(workspace_id, kol_database_id),
+          CHECK (clinic_status IN ('watching','interested','contacted','worked_with','not_selected')),
+          CHECK (clinic_rating IS NULL OR (clinic_rating >= 1 AND clinic_rating <= 5))
+        )
+      `);
+      await exec(
+        'CREATE INDEX IF NOT EXISTS idx_saivaree_kol_meta_creator ON saivaree_kol_meta(workspace_id, saivaree_creator_id)'
+      );
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,
