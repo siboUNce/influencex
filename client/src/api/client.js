@@ -178,6 +178,13 @@ export const api = {
   retryKolDatabaseAll: () => request('/kol-database/retry-all', { method: 'POST' }),
   importCampaignKols: (campaignId) => request(`/kol-database/import-campaign/${campaignId}`, { method: 'POST' }),
 
+  // Saivaree Creator Intelligence
+  getSaivareeKolMeta: (kolId) => request(`/saivaree/kols/${kolId}/meta`),
+  updateSaivareeKolMeta: (kolId, data) => request(`/saivaree/kols/${kolId}/meta`, { method: 'PATCH', body: data }),
+  getSaivareeAnalysis: (kolId) => request(`/saivaree/kols/${kolId}/analysis`),
+  analyzeSaivareeKol: (kolId) => request(`/saivaree/kols/${kolId}/analyze`, { method: 'POST' }),
+  compareSaivareeKols: (kolIds) => request('/saivaree/compare', { method: 'POST', body: { kol_ids: kolIds } }),
+
   // Creator Marketplace (roadmap D2) — shared, cross-workspace catalog of
   // public creator profiles. Contains no email / contact data by design.
   getMarketplaceCreators: (params = {}) => {

@@ -7,6 +7,7 @@ import { useI18n } from '../i18n';
 import Modal from '../components/Modal';
 import FormField from '../components/FormField';
 import ErrorCard from '../components/ErrorCard';
+import AnalysisPanel from '../features/saivaree-intelligence/AnalysisPanel';
 
 export default function KolDatabase() {
   const { t } = useI18n();
@@ -491,6 +492,8 @@ function KolDetailModal({ kol, onClose }) {
             <div><strong>{t('kol_db.detail_language')}</strong> {kol.language || '-'}</div>
             <div><strong>{t('kol_db.detail_profile')}</strong> <a href={kol.profile_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>{t('kol_db.open_profile')}</a></div>
           </div>
+
+          <AnalysisPanel kol={kol} />
 
           {kol.outreach_email_subject && (
             <div style={{ marginTop: '16px' }}>
