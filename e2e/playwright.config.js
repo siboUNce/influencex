@@ -14,7 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { defineConfig, devices } = require('@playwright/test');
-const { BASE_URL, PORT, REPO_ROOT, resetDatabaseFile, serverEnv } = require('./env');
+const { ANALYZER_URL, BASE_URL, PORT, REPO_ROOT, resetDatabaseFile, serverEnv } = require('./env');
 
 // The suite drives the built SPA that Express serves out of client/dist.
 // Building it here would hide staleness and slow every run, so instead fail
@@ -66,17 +66,25 @@ module.exports = defineConfig({
 
   globalSetup: require.resolve('./global-setup.js'),
 
-  webServer: {
-    command: 'node server/index.js',
-    cwd: REPO_ROOT,
-    url: `${BASE_URL}/healthz`,
-    // Never reuse a server we didn't start: a developer's `npm run dev` on
-    // 8080 is pointed at the real influencex.db, and silently testing against
-    // it would write demo rows into their working database.
-    reuseExistingServer: false,
-    timeout: 120_000,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: serverEnv({ PORT: String(PORT) }),
-  },
+  webServer: [
+    {
+      command: 'node e2e/fake-analyzer.js',
+      cwd: REPO_ROOT,
+      url: `${ANALYZER_URL}/health`,
+      reuseExistingServer: false,
+      timeout: 30_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
+      command: 'node server/index.js',
+      cwd: REPO_ROOT,
+      url: `${BASE_URL}/healthz`,
+      reuseExistingServer: false,
+      timeout: 120_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: serverEnv({ PORT: String(PORT) }),
+    },
+  ],
 });

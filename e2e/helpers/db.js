@@ -138,12 +138,61 @@ function cleanupFixture(fixture) {
   });
 }
 
+
+function seedSaivareeIntelligenceKols() {
+  const { workspaceId } = demoWorkspace();
+  const cachedId = uuid();
+  const freshId = uuid();
+
+  withDb((db) => {
+    const stmt = db.prepare(
+      `INSERT INTO kol_database
+       (id, workspace_id, platform, username, display_name, profile_url,
+        followers, engagement_rate, avg_views, scrape_status, updated_at)
+       VALUES (?, ?, 'tiktok', ?, ?, ?, ?, ?, ?, 'complete', CURRENT_TIMESTAMP)`
+    );
+    stmt.run(
+      cachedId,
+      workspaceId,
+      'e2e.cached.creator',
+      'E2E Cached Creator',
+      'https://www.tiktok.com/@e2e.cached.creator',
+      25000,
+      5.5,
+      12000
+    );
+    stmt.run(
+      freshId,
+      workspaceId,
+      'e2e.fresh.creator',
+      'E2E Fresh Creator',
+      'https://www.tiktok.com/@e2e.fresh.creator',
+      18000,
+      4.8,
+      7000
+    );
+  });
+
+  return { workspaceId, cachedId, freshId };
+}
+
+function cleanupSaivareeIntelligenceKols(fixture) {
+  if (!fixture) return;
+  withDb((db) => {
+    db.prepare('DELETE FROM saivaree_kol_meta WHERE workspace_id = ? AND kol_database_id IN (?, ?)')
+      .run(fixture.workspaceId, fixture.cachedId, fixture.freshId);
+    db.prepare('DELETE FROM kol_database WHERE id IN (?, ?)').run(fixture.cachedId, fixture.freshId);
+  });
+}
+
 module.exports = {
   cleanupFixture,
+  cleanupSaivareeIntelligenceKols,
   countRows,
   demoWorkspace,
   getContact,
   getPipelineJob,
   seedReviewStageJob,
+  seedSaivareeIntelligenceKols,
   withDb,
 };

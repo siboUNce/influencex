@@ -30,6 +30,9 @@ const DB_PATH = path.join(TMP_DIR, 'e2e.db');
 
 const PORT = parseInt(process.env.E2E_PORT, 10) || 8080;
 const BASE_URL = `http://localhost:${PORT}`;
+const ANALYZER_PORT = parseInt(process.env.E2E_ANALYZER_PORT, 10) || 18081;
+const ANALYZER_URL = `http://127.0.0.1:${ANALYZER_PORT}`;
+const ANALYZER_INTERNAL_KEY = 'e2e-influencex-internal-key-at-least-32-bytes';
 const STORAGE_STATE = path.join(TMP_DIR, 'admin-storage-state.json');
 
 const ADMIN = { email: 'demo@influencex.dev', password: 'demo1234' };
@@ -85,6 +88,11 @@ function serverEnv(extra = {}) {
     OTEL_EXPORTER_OTLP_ENDPOINT: '',
     REDIS_URL: '',
 
+    // Saivaree Analyzer: E2E points only at the local deterministic fake service.
+    SAIVAREE_ANALYZER_BASE_URL: ANALYZER_URL,
+    SAIVAREE_ANALYZER_INTERNAL_API_KEY: ANALYZER_INTERNAL_KEY,
+    SAIVAREE_ANALYZER_TIMEOUT_MS: '2000',
+
     ...extra,
   };
 }
@@ -112,6 +120,9 @@ function resetDatabaseFile() {
 
 module.exports = {
   ADMIN,
+  ANALYZER_INTERNAL_KEY,
+  ANALYZER_PORT,
+  ANALYZER_URL,
   BASE_URL,
   DB_PATH,
   PORT,
