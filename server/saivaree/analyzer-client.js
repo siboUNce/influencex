@@ -1,0 +1,106 @@
+'use strict';
+
+class AnalyzerUnavailableError extends Error {
+  constructor(message = 'Saivaree Analyzer is unavailable') {
+    super(message);
+    this.name = 'AnalyzerUnavailableError';
+    this.code = 'analyzer_unavailable';
+  }
+}
+
+function createAnalyzerClient({
+  baseUrl,
+  apiKey,
+  timeoutMs = 8000,
+  fetchImpl = global.fetch,
+}) {
+  if (!baseUrl) throw new Error('SAIVAREE_ANALYZER_BASE_URL is required');
+  if (!apiKey) throw new Error('SAIVAREE_ANALYZER_INTERNAL_API_KEY is required');
+  if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
+
+  const root = String(baseUrl).replace(/\/$/, '');
+
+  async function call(path, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchImpl(root + path, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-InfluenceX-Internal-Key': apiKey,
+          ...(options.headers || {}),
+        },
+      });
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch {
+        payload = {};
+      }
+      return { response, payload };
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new AnalyzerUnavailableError('Saivaree Analyzer request timed out');
+      }
+      throw new AnalyzerUnavailableError();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function requireOk(path, options) {
+    const { response, payload } = await call(path, options);
+    if (!response.ok) {
+      if (response.status >= 500) throw new AnalyzerUnavailableError();
+      const error = new Error(payload?.detail || 'Saivaree Analyzer request failed');
+      error.code = 'analyzer_request_failed';
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  }
+
+  return {
+    async resolveCreator({ platform, username }) {
+      const query = new URLSearchParams({
+        platform: String(platform || ''),
+        username: String(username || ''),
+      });
+      return requireOk('/internal/influencex/creators/resolve?' + query.toString());
+    },
+
+    async getAnalysis(creatorId) {
+      const path = '/internal/influencex/creators/' +
+        encodeURIComponent(String(creatorId)) +
+        '/analysis';
+      const { response, payload } = await call(path);
+      if (response.status === 404) return { analysis_status: 'missing' };
+      if (response.status >= 500) throw new AnalyzerUnavailableError();
+      if (!response.ok) {
+        const error = new Error(payload?.detail || 'Saivaree Analyzer request failed');
+        error.code = 'analyzer_request_failed';
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    },
+
+    async analyze({ platform, username, requestId }) {
+      return requireOk('/internal/influencex/creators/analyze', {
+        method: 'POST',
+        body: JSON.stringify({
+          platform,
+          username,
+          request_id: requestId,
+        }),
+      });
+    },
+  };
+}
+
+module.exports = {
+  AnalyzerUnavailableError,
+  createAnalyzerClient,
+};

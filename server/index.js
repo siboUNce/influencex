@@ -88,6 +88,7 @@ const apify = require('./apify-client');
 // Single guarded egress path for user-supplied URLs (SSRF: HTTPS-only,
 // private/metadata ranges blocked, every redirect hop re-validated).
 const { safeFetchRaw } = require('./web/web-fetch');
+const { registerSaivareeIntelligenceRoutes } = require('./saivaree/intelligence-routes');
 
 // Shared job queue for background work (scraping, enrichment, etc)
 // Pick the queue backend at boot. With REDIS_URL set, BullMQ takes over —
@@ -1143,6 +1144,12 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   // default to keep older clients working.
   const lenient = process.env.STRICT_WORKSPACE_SCOPE !== 'true';
   workspaceContext({ lenient })(req, res, next);
+});
+
+registerSaivareeIntelligenceRoutes(app, {
+  basePath: BASE_PATH,
+  db: { queryOne, exec },
+  rbac,
 });
 
 // ==================== Campaign API ====================
