@@ -8,6 +8,7 @@ import Modal from '../components/Modal';
 import FormField from '../components/FormField';
 import ErrorCard from '../components/ErrorCard';
 import AnalysisPanel from '../features/saivaree-intelligence/AnalysisPanel';
+import CreatorCompare from '../features/saivaree-intelligence/CreatorCompare';
 
 export default function KolDatabase() {
   const { t } = useI18n();
@@ -22,6 +23,8 @@ export default function KolDatabase() {
   const [retryingAll, setRetryingAll] = useState(false);
   const [retryingId, setRetryingId] = useState(null);
   const [selectedKol, setSelectedKol] = useState(null);
+  const [compareIds, setCompareIds] = useState([]);
+  const [showCompare, setShowCompare] = useState(false);
   const [apiStatus, setApiStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const pollRef = useRef(null);
@@ -113,6 +116,13 @@ export default function KolDatabase() {
   };
 
   const scrapingCount = kols.filter(k => k.scrape_status === 'scraping').length;
+  const selectedCompareKols = kols.filter(k => compareIds.includes(k.id));
+
+  const toggleCompare = (id) => {
+    setCompareIds(current => current.includes(id)
+      ? current.filter(value => value !== id)
+      : [...current, id].slice(-10));
+  };
 
   return (
     <div className="page-container fade-in">
@@ -138,6 +148,13 @@ export default function KolDatabase() {
               {importing ? `⏳ ${t('kol_db.importing')}` : `📥 ${t('kol_db.import_from', { name: selectedCampaign.name })}`}
             </button>
           )}
+          <button
+            className="btn btn-secondary"
+            onClick={() => setShowCompare(true)}
+            disabled={selectedCompareKols.length < 2}
+          >
+            {t('kol_db.compare_button')} ({selectedCompareKols.length})
+          </button>
           <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
             ➕ {t('kol_db.add_by_url')}
           </button>
@@ -239,6 +256,7 @@ export default function KolDatabase() {
             <table>
               <thead>
                 <tr>
+                  <th style={{ width: 44 }} aria-label={t('kol_db.compare_button')}></th>
                   <th>{t('kol_db.col_kol')}</th>
                   <th>{t('kol_db.col_platform')}</th>
                   <th>{t('kol_db.col_followers')}</th>
@@ -254,6 +272,14 @@ export default function KolDatabase() {
               <tbody>
                 {kols.map(kol => (
                   <tr key={kol.id} style={{ cursor: 'pointer' }} onClick={() => setSelectedKol(kol)}>
+                    <td onClick={e => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={compareIds.includes(kol.id)}
+                        onChange={() => toggleCompare(kol.id)}
+                        aria-label={t('kol_db.compare_select', { name: kol.display_name || kol.username })}
+                      />
+                    </td>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <div className="kol-avatar">
@@ -332,6 +358,9 @@ export default function KolDatabase() {
 
       {showAddModal && <AddKolModal onClose={() => setShowAddModal(false)} onAdded={loadKols} />}
       {selectedKol && <KolDetailModal kol={selectedKol} onClose={() => setSelectedKol(null)} />}
+      {showCompare && selectedCompareKols.length >= 2 && (
+        <CreatorCompare kols={selectedCompareKols} onClose={() => setShowCompare(false)} />
+      )}
     </div>
   );
 }
