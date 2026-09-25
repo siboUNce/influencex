@@ -23,6 +23,12 @@ const {
   registerSaivareeIntelligenceRoutes,
 } = require('../saivaree/intelligence-routes');
 const { createAnalyzerClient } = require('../saivaree/analyzer-client');
+const {
+  normalizeMigrationRecord,
+  planMigration,
+  applyMigration,
+  parseArgs,
+} = require('../../scripts/migrate-saivaree-creators');
 
 before(async () => {
   await initializeDatabase();
@@ -311,6 +317,153 @@ test('compare handler reads cached analysis only', async () => {
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.creators.length, 2);
   assert.equal(analyzeCalls, 0);
+});
+
+
+
+test('creator migration normalizes TikTok identity and dry-run performs no writes', async () => {
+  const workspaceId = 'migration-ws-dry';
+  const beforeKols = await queryOne(
+    'SELECT COUNT(*) AS n FROM kol_database WHERE workspace_id = ?',
+    [workspaceId]
+  );
+  const beforeMeta = await queryOne(
+    'SELECT COUNT(*) AS n FROM saivaree_kol_meta WHERE workspace_id = ?',
+    [workspaceId]
+  );
+
+  const normalized = normalizeMigrationRecord({
+    platform: 'TikTok',
+    username: 'https://www.tiktok.com/@Creator.Name',
+    display_name: 'Creator Name',
+    clinic_status: 'contacted',
+    clinic_rating: 5,
+    clinic_notes: 'test',
+  });
+  assert.equal(normalized.platform, 'tiktok');
+  assert.equal(normalized.username, 'creator.name');
+  assert.equal(normalized.profile_url, 'https://www.tiktok.com/@creator.name');
+
+  const result = await planMigration({
+    db: { queryOne },
+    workspaceId,
+    records: [
+      {
+        platform: 'TikTok',
+        username: '@Creator.Name',
+        display_name: 'Creator Name',
+        clinic_status: 'contacted',
+        clinic_rating: 5,
+        clinic_notes: 'test',
+      },
+    ],
+  });
+
+  assert.deepEqual(result.summary, {
+    input: 1,
+    matched: 0,
+    wouldCreate: 1,
+    conflicts: 0,
+    invalid: 0,
+  });
+
+  const afterKols = await queryOne(
+    'SELECT COUNT(*) AS n FROM kol_database WHERE workspace_id = ?',
+    [workspaceId]
+  );
+  const afterMeta = await queryOne(
+    'SELECT COUNT(*) AS n FROM saivaree_kol_meta WHERE workspace_id = ?',
+    [workspaceId]
+  );
+  assert.equal(Number(afterKols.n), Number(beforeKols.n));
+  assert.equal(Number(afterMeta.n), Number(beforeMeta.n));
+});
+
+test('creator migration apply is idempotent and preserves clinic metadata', async () => {
+  const workspaceId = 'migration-ws-apply';
+  const records = [
+    {
+      platform: 'tiktok',
+      username: '@Idempotent.Creator',
+      display_name: 'Idempotent Creator',
+      clinic_status: 'worked_with',
+      clinic_rating: 4,
+      clinic_notes: 'เคยร่วมงาน',
+    },
+  ];
+
+  const first = await applyMigration({
+    db: { queryOne, exec },
+    workspaceId,
+    records,
+    idFactory: () => 'migration-kol-1',
+  });
+  const second = await applyMigration({
+    db: { queryOne, exec },
+    workspaceId,
+    records,
+    idFactory: () => 'must-not-be-used',
+  });
+
+  assert.equal(first.created, 1);
+  assert.equal(first.matched, 0);
+  assert.equal(second.created, 0);
+  assert.equal(second.matched, 1);
+
+  const kol = await queryOne(
+    'SELECT id, platform, username, display_name, profile_url FROM kol_database WHERE workspace_id = ? AND platform = ? AND LOWER(username) = ?',
+    [workspaceId, 'tiktok', 'idempotent.creator']
+  );
+  assert.equal(kol.id, 'migration-kol-1');
+  assert.equal(kol.display_name, 'Idempotent Creator');
+
+  const meta = await getSaivareeMeta(
+    { queryOne, exec },
+    workspaceId,
+    'migration-kol-1'
+  );
+  assert.equal(meta.clinic_status, 'worked_with');
+  assert.equal(meta.clinic_rating, 4);
+  assert.equal(meta.clinic_notes, 'เคยร่วมงาน');
+
+  const count = await queryOne(
+    'SELECT COUNT(*) AS n FROM kol_database WHERE workspace_id = ? AND platform = ? AND LOWER(username) = ?',
+    [workspaceId, 'tiktok', 'idempotent.creator']
+  );
+  assert.equal(Number(count.n), 1);
+});
+
+
+
+test('creator migration CLI requires explicit workspace for apply and has no delete mode', () => {
+  assert.throws(
+    () => parseArgs(['--input', 'migration.json', '--apply']),
+    /--workspace is required with --apply/
+  );
+  assert.throws(
+    () => parseArgs(['--input', 'migration.json', '--workspace', 'ws-test', '--delete']),
+    /unknown argument: --delete/
+  );
+
+  assert.deepEqual(
+    parseArgs(['--input', 'migration.json']),
+    { apply: false, input: 'migration.json', workspace: null }
+  );
+});
+
+test('creator migration detects duplicate normalized identities as conflicts', async () => {
+  const result = await planMigration({
+    db: { queryOne },
+    workspaceId: 'migration-ws-conflict',
+    records: [
+      { platform: 'tiktok', username: '@Same.User', clinic_status: 'watching' },
+      { platform: 'tiktok', username: 'same.user', clinic_status: 'contacted' },
+    ],
+  });
+
+  assert.equal(result.summary.input, 2);
+  assert.equal(result.summary.conflicts, 1);
+  assert.equal(result.summary.wouldCreate, 0);
 });
 
 test('route registration does not crash when Analyzer env is not configured', () => {
