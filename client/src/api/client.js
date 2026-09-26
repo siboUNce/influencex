@@ -184,6 +184,9 @@ export const api = {
   getSaivareeAnalysis: (kolId) => request(`/saivaree/kols/${kolId}/analysis`),
   analyzeSaivareeKol: (kolId) => request(`/saivaree/kols/${kolId}/analyze`, { method: 'POST' }),
   compareSaivareeKols: (kolIds) => request('/saivaree/compare', { method: 'POST', body: { kol_ids: kolIds } }),
+  getSaivareeSettings: () => request('/saivaree/settings'),
+  updateSaivareeSettings: (data) => request('/saivaree/settings', { method: 'PUT', body: data }),
+  testSaivareeSettings: () => request('/saivaree/settings/test', { method: 'POST', body: {} }),
 
   // Creator Marketplace (roadmap D2) — shared, cross-workspace catalog of
   // public creator profiles. Contains no email / contact data by design.

@@ -1150,6 +1150,7 @@ registerSaivareeIntelligenceRoutes(app, {
   basePath: BASE_PATH,
   db: { queryOne, exec },
   rbac,
+  platformAdmin: requirePlatformAdmin,
 });
 
 // ==================== Campaign API ====================

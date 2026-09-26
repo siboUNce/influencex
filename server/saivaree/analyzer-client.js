@@ -97,6 +97,24 @@ function createAnalyzerClient({
         }),
       });
     },
+
+    async getSettings() {
+      return requireOk('/internal/influencex/settings');
+    },
+
+    async updateSettings(patch) {
+      return requireOk('/internal/influencex/settings', {
+        method: 'PUT',
+        body: JSON.stringify(patch || {}),
+      });
+    },
+
+    async testSettings() {
+      return requireOk('/internal/influencex/settings/test', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+    },
   };
 }
 

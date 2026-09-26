@@ -298,6 +298,7 @@ function registerSaivareeIntelligenceRoutes(app, {
   db,
   rbac,
   analyzer,
+  platformAdmin,
 }) {
   const configuredAnalyzer = analyzer || createConfiguredAnalyzer();
   const handlers = createSaivareeHandlers({ db, analyzer: configuredAnalyzer });
@@ -327,6 +328,38 @@ function registerSaivareeIntelligenceRoutes(app, {
     rbac.requirePermission('kol.read'),
     handlers.compare
   );
+
+  const adminOnly = platformAdmin || ((req, res, next) => {
+    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Only platform admins can perform this action' });
+    next();
+  });
+
+  app.get(`${basePath}/api/saivaree/settings`, adminOnly, async (req, res) => {
+    try {
+      res.json(await configuredAnalyzer.getSettings());
+    } catch (error) {
+      if (error?.code === 'analyzer_unavailable') return res.status(503).json({ error: 'Analyzer unavailable' });
+      return res.status(error?.status || 500).json({ error: error?.message || 'Unable to load settings' });
+    }
+  });
+
+  app.put(`${basePath}/api/saivaree/settings`, adminOnly, async (req, res) => {
+    try {
+      res.json(await configuredAnalyzer.updateSettings(req.body || {}));
+    } catch (error) {
+      if (error?.code === 'analyzer_unavailable') return res.status(503).json({ error: 'Analyzer unavailable' });
+      return res.status(error?.status || 500).json({ error: error?.message || 'Unable to update settings' });
+    }
+  });
+
+  app.post(`${basePath}/api/saivaree/settings/test`, adminOnly, async (req, res) => {
+    try {
+      res.json(await configuredAnalyzer.testSettings());
+    } catch (error) {
+      if (error?.code === 'analyzer_unavailable') return res.status(503).json({ error: 'Analyzer unavailable' });
+      return res.status(error?.status || 500).json({ error: error?.message || 'Unable to test settings' });
+    }
+  });
 }
 
 function createConfiguredAnalyzer() {
@@ -349,6 +382,9 @@ function createConfiguredAnalyzer() {
     resolveCreator: unavailable,
     getAnalysis: unavailable,
     analyze: unavailable,
+    getSettings: unavailable,
+    updateSettings: unavailable,
+    testSettings: unavailable,
   };
 }
 

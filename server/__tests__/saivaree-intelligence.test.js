@@ -476,6 +476,7 @@ test('route registration does not crash when Analyzer env is not configured', ()
   const app = {
     get(path, permission, handler) { registrations.push(['GET', path, permission, handler]); },
     patch(path, permission, handler) { registrations.push(['PATCH', path, permission, handler]); },
+    put(path, permission, handler) { registrations.push(['PUT', path, permission, handler]); },
     post(path, permission, handler) { registrations.push(['POST', path, permission, handler]); },
   };
   const fakeRbac = {
@@ -490,7 +491,7 @@ test('route registration does not crash when Analyzer env is not configured', ()
       db: { queryOne: async () => null, exec: async () => {} },
       rbac: fakeRbac,
     }));
-    assert.equal(registrations.length, 5);
+    assert.equal(registrations.length, 8);
     assert.equal(registrations[0][2].permission, 'kol.read');
     assert.equal(registrations[1][2].permission, 'kol.update');
   } finally {

@@ -36,6 +36,7 @@ import DiscoveryPage from './pages/DiscoveryPage';
 import ReviewsPage from './pages/ReviewsPage';
 import ChangelogPage from './pages/ChangelogPage';
 import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
+import CreatorIntelligenceSettingsPage from './pages/CreatorIntelligenceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import CommandPalette from './components/CommandPalette';
@@ -323,6 +324,7 @@ function AppContent() {
               <Route path="/invite-codes" element={<InviteCodesPage />} />
               <Route path="/apify-runs" element={<ApifyRunsPage />} />
               <Route path="/workspace/settings" element={<WorkspaceSettingsPage />} />
+              <Route path="/creator-intelligence-settings" element={user?.role === 'admin' ? <CreatorIntelligenceSettingsPage /> : <Navigate to="/" replace />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
             </RouteBoundary>
