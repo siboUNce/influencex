@@ -5038,6 +5038,51 @@ app.get(`${BASE_PATH}/api/kol-database/:id`, rbac.requirePermission('kol.read'),
   }
 });
 
+// Update the platform for a KOL database row. This is used to repair
+// legacy/manual rows where only an @handle was stored and platform was unknown.
+app.patch(`${BASE_PATH}/api/kol-database/:id/platform`, rbac.requirePermission('kol.update'), async (req, res) => {
+  try {
+    const platform = String(req.body?.platform || '').trim().toLowerCase();
+    const allowed = new Set(['tiktok', 'youtube', 'instagram', 'twitch', 'x']);
+    if (!allowed.has(platform)) {
+      return res.status(400).json({ error: 'Unsupported platform' });
+    }
+
+    const s = scoped(req.workspace.id);
+    const kol = await s.queryOne(
+      'SELECT * FROM kol_database WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!kol) return res.status(404).json({ error: 'KOL not found' });
+
+    let profileUrl = kol.profile_url;
+    if (!profileUrl || profileUrl === '@' + kol.username || profileUrl === kol.username) {
+      if (platform === 'tiktok') profileUrl = `https://www.tiktok.com/@${kol.username}`;
+      else if (platform === 'instagram') profileUrl = `https://www.instagram.com/${kol.username}`;
+      else if (platform === 'youtube') profileUrl = `https://www.youtube.com/@${kol.username}`;
+      else if (platform === 'twitch') profileUrl = `https://www.twitch.tv/${kol.username}`;
+      else if (platform === 'x') profileUrl = `https://x.com/${kol.username}`;
+    }
+
+    await s.exec(
+      `UPDATE kol_database
+       SET platform = ?, profile_url = ?, scrape_status = CASE WHEN scrape_status = 'error' THEN 'partial' ELSE scrape_status END,
+           scrape_error = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND workspace_id = ?`,
+      [platform, profileUrl, kol.id, req.workspace.id]
+    );
+
+    const updated = await s.queryOne(
+      'SELECT * FROM kol_database WHERE id = ? AND workspace_id = ?',
+      [kol.id, req.workspace.id]
+    );
+    updated.tags = JSON.parse(updated.tags || '[]');
+    return res.json(updated);
+  } catch (e) {
+    return res.status(500).json({ error: safeError(e) });
+  }
+});
+
 // Add KOL by profile URL - triggers AI scrape
 app.post(`${BASE_PATH}/api/kol-database`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {

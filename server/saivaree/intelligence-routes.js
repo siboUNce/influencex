@@ -133,6 +133,14 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     let meta = await getSaivareeMeta(db, workspaceId, kol.id);
     if (meta?.saivaree_creator_id) return meta;
 
+    if (String(kol.platform || '').toLowerCase() !== 'tiktok') {
+      return upsertSaivareeMeta(db, workspaceId, kol.id, {
+        platform: kol.platform || 'unknown',
+        username: kol.username,
+        saivaree_creator_id: null,
+      });
+    }
+
     const resolved = await analyzer.resolveCreator({
       platform: kol.platform,
       username: kol.username,
@@ -210,6 +218,13 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
       const workspaceId = req.workspace.id;
       const kol = await loadWorkspaceKol(db, workspaceId, req.params.kolId);
       if (!kol) return res.status(404).json({ error: 'KOL not found' });
+
+      if (String(kol.platform || '').toLowerCase() !== 'tiktok') {
+        return res.status(400).json({
+          error: 'TikTok platform is required before starting Creator Intelligence analysis',
+          code: 'platform_required',
+        });
+      }
 
       const requestId = `${workspaceId}:${kol.id}:${randomUUID()}`;
       const result = await analyzer.analyze({

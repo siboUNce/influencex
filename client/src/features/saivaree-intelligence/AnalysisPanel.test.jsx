@@ -117,6 +117,19 @@ describe('AnalysisPanel', () => {
     expect(screen.queryByText('2700%')).not.toBeInTheDocument();
   });
 
+  it('does not call Analyzer when the creator platform is unknown', async () => {
+    render(
+      <I18nProvider>
+        <AnalysisPanel kol={{ ...KOL, platform: 'unknown' }} />
+      </I18nProvider>
+    );
+
+    await screen.findByText(/select tiktok as the platform/i);
+    expect(api.getSaivareeAnalysis).not.toHaveBeenCalled();
+    expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /^analyze$/i })).toBeDisabled();
+  });
+
   it('shows unavailable state and never fabricates zero metrics', async () => {
     const error = new Error('unavailable');
     error.statusCode = 503;

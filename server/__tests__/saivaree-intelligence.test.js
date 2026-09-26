@@ -266,6 +266,53 @@ test('cached analysis handler scopes KOL lookup and never calls analyze', async 
   assert.deepEqual(sqlCalls[0].params, ['kol-1', 'ws-a']);
 });
 
+test('unknown platform is treated as missing and never calls Analyzer', async () => {
+  let storedMeta = null;
+  const fakeDb = {
+    async queryOne(sql, params) {
+      if (/FROM kol_database/i.test(sql)) {
+        return { id: 'kol-u', workspace_id: params[1], platform: 'unknown', username: 'babyben_dd' };
+      }
+      if (/FROM saivaree_kol_meta/i.test(sql)) return storedMeta;
+      return null;
+    },
+    async exec(sql, params) {
+      if (/INSERT INTO saivaree_kol_meta/i.test(sql)) {
+        storedMeta = {
+          workspace_id: params[0],
+          kol_database_id: params[1],
+          platform: params[2],
+          username: params[3],
+          saivaree_creator_id: params[4],
+          clinic_status: params[5],
+          clinic_rating: params[6],
+          clinic_notes: params[7],
+        };
+      }
+    },
+  };
+  let resolveCalls = 0;
+  let analyzeCalls = 0;
+  const analyzer = {
+    async resolveCreator() { resolveCalls += 1; return { creator_id: null }; },
+    async getAnalysis() { throw new Error('getAnalysis should not run'); },
+    async analyze() { analyzeCalls += 1; },
+  };
+  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer, randomUUID: () => 'uuid-1' });
+
+  const readRes = makeRes();
+  await handlers.getAnalysis({ workspace: { id: 'ws-a' }, params: { kolId: 'kol-u' } }, readRes);
+  assert.equal(readRes.statusCode, 200);
+  assert.equal(readRes.body.analysis_status, 'missing');
+  assert.equal(resolveCalls, 0);
+
+  const analyzeRes = makeRes();
+  await handlers.analyze({ workspace: { id: 'ws-a' }, params: { kolId: 'kol-u' } }, analyzeRes);
+  assert.equal(analyzeRes.statusCode, 400);
+  assert.equal(analyzeRes.body.code, 'platform_required');
+  assert.equal(analyzeCalls, 0);
+});
+
 test('compare handler reads cached analysis only', async () => {
   const fakeDb = {
     async queryOne(sql, params) {

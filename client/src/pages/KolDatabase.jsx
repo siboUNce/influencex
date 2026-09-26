@@ -357,7 +357,16 @@ export default function KolDatabase() {
       )}
 
       {showAddModal && <AddKolModal onClose={() => setShowAddModal(false)} onAdded={loadKols} />}
-      {selectedKol && <KolDetailModal kol={selectedKol} onClose={() => setSelectedKol(null)} />}
+      {selectedKol && (
+        <KolDetailModal
+          kol={selectedKol}
+          onClose={() => setSelectedKol(null)}
+          onUpdated={(updated) => {
+            setSelectedKol(updated);
+            setKols(current => current.map(item => item.id === updated.id ? updated : item));
+          }}
+        />
+      )}
       {showCompare && selectedCompareKols.length >= 2 && (
         <CreatorCompare kols={selectedCompareKols} onClose={() => setShowCompare(false)} />
       )}
@@ -539,6 +548,19 @@ function KolDetailModal({ kol, onClose }) {
             <div><strong>{t('kol_db.detail_language')}</strong> {kol.language || '-'}</div>
             <div><strong>{t('kol_db.detail_profile')}</strong> <a href={kol.profile_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>{t('kol_db.open_profile')}</a></div>
           </div>
+
+          {String(kol.platform || '').toLowerCase() !== 'tiktok' && (
+            <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Creator Intelligence needs a platform</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+                Saivaree Analyzer currently supports TikTok. This creator is stored as {kol.platform || 'unknown'}.
+              </div>
+              <button type="button" className="btn btn-sm btn-secondary" onClick={setTikTokPlatform} disabled={savingPlatform}>
+                {savingPlatform ? 'Saving…' : 'Set as TikTok'}
+              </button>
+              {platformError && <div role="alert" style={{ marginTop: 8, fontSize: 12, color: 'var(--danger)' }}>{platformError}</div>}
+            </div>
+          )}
 
           <AnalysisPanel kol={kol} />
 

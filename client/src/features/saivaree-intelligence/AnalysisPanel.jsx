@@ -46,9 +46,16 @@ export default function AnalysisPanel({ kol }) {
   const [queued, setQueued] = useState(false);
   const [error, setError] = useState(null);
 
+  const supportedPlatform = String(kol.platform || '').toLowerCase() === 'tiktok';
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    if (!supportedPlatform) {
+      setAnalysis({ analysis_status: 'unsupported_platform' });
+      setLoading(false);
+      return;
+    }
     try {
       const result = await api.getSaivareeAnalysis(kol.id);
       setAnalysis(result);
@@ -58,7 +65,7 @@ export default function AnalysisPanel({ kol }) {
     } finally {
       setLoading(false);
     }
-  }, [kol.id]);
+  }, [kol.id, supportedPlatform]);
 
   useEffect(() => {
     load();
@@ -96,7 +103,7 @@ export default function AnalysisPanel({ kol }) {
             {t('kol_db.analysis_subtitle')}
           </div>
         </div>
-        <button type="button" className="btn btn-sm btn-primary" onClick={handleAnalyze} disabled={running}>
+        <button type="button" className="btn btn-sm btn-primary" onClick={handleAnalyze} disabled={running || !supportedPlatform}>
           {running
             ? t('kol_db.analysis_running')
             : hasAnalysis
@@ -116,6 +123,12 @@ export default function AnalysisPanel({ kol }) {
       {!loading && error && error !== 'unavailable' && (
         <div role="alert" style={{ fontSize: 13, color: 'var(--danger)' }}>
           {error === 'run' ? t('kol_db.analysis_run_error') : t('kol_db.analysis_load_error')}
+        </div>
+      )}
+
+      {!loading && !error && status === 'unsupported_platform' && (
+        <div style={{ fontSize: 13, color: 'var(--warning)' }}>
+          Select TikTok as the platform before using Creator Intelligence.
         </div>
       )}
 
