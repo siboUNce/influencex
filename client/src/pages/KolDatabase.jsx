@@ -463,6 +463,24 @@ function AddKolModal({ onClose, onAdded }) {
   );
 }
 
+function formatKolDetailNumber(kol, value) {
+  if (value === null || value === undefined) return '-';
+  if (kol.scrape_status === 'partial' && Number(value) === 0) return '-';
+  return formatNumber(value);
+}
+
+function formatKolDetailPercent(kol, value) {
+  if (value === null || value === undefined) return '-';
+  if (kol.scrape_status === 'partial' && Number(value) === 0) return '-';
+  return Number(value).toFixed(1) + '%';
+}
+
+function formatKolDetailScore(kol, value) {
+  if (value === null || value === undefined) return '-';
+  if (kol.scrape_status === 'partial' && Number(value) === 0) return '-';
+  return value;
+}
+
 function KolDetailModal({ kol, onClose }) {
   const { t } = useI18n();
   return (
@@ -485,14 +503,14 @@ function KolDetailModal({ kol, onClose }) {
         </div>
         <div className="modal-body">
           <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: '20px' }}>
-            <div className="stat-card"><div><div className="stat-value">{formatNumber(kol.followers)}</div><div className="stat-label">{t('kol_db.col_followers')}</div></div></div>
-            <div className="stat-card"><div><div className="stat-value">{kol.engagement_rate?.toFixed(1) || '0'}%</div><div className="stat-label">{t('kol_db.detail_engagement')}</div></div></div>
-            <div className="stat-card"><div><div className="stat-value">{formatNumber(kol.avg_views)}</div><div className="stat-label">{t('kol_db.detail_avg_views')}</div></div></div>
+            <div className="stat-card"><div><div className="stat-value">{formatKolDetailNumber(kol, kol.followers)}</div><div className="stat-label">{t('kol_db.col_followers')}</div></div></div>
+            <div className="stat-card"><div><div className="stat-value">{formatKolDetailPercent(kol, kol.engagement_rate)}</div><div className="stat-label">{t('kol_db.detail_engagement')}</div></div></div>
+            <div className="stat-card"><div><div className="stat-value">{formatKolDetailNumber(kol, kol.avg_views)}</div><div className="stat-label">{t('kol_db.detail_avg_views')}</div></div></div>
             <div className="stat-card">
               <div>
                 <div className="stat-value">
                   <span className={`badge ${kol.ai_score >= 80 ? 'badge-green' : kol.ai_score >= 60 ? 'badge-orange' : 'badge-red'}`} style={{ fontSize: '18px' }}>
-                    {kol.ai_score || 0}
+                    {formatKolDetailScore(kol, kol.ai_score)}
                   </span>
                 </div>
                 <div className="stat-label">{t('kol_db.col_ai_score')}</div>

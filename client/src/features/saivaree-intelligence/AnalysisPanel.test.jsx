@@ -72,7 +72,7 @@ describe('AnalysisPanel', () => {
         recent_weighted_median_views: 11000,
         p25_views: 8000,
         p75_views: 16000,
-        view_consistency: 0.74,
+        view_consistency: 74,
         viral_dependency: 0.18,
         views_per_follower: null,
       },
@@ -88,6 +88,33 @@ describe('AnalysisPanel', () => {
     expect(screen.getByText('18%')).toBeInTheDocument();
     expect(screen.getAllByText('-').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: /re-analyze/i })).toBeInTheDocument();
+  });
+
+  it('formats score percentages and ratio percentages using their native scales', async () => {
+    api.getSaivareeAnalysis.mockResolvedValue({
+      analysis_status: 'available',
+      observed_metrics: {
+        median_views: 82,
+        recent_weighted_median_views: 31,
+        p25_views: 79,
+        p75_views: 256,
+        view_consistency: 30.88,
+        viral_dependency: 0.58,
+        views_per_follower: 0.0045303,
+        sample_size: 5,
+      },
+      evidence_quality: { confidence_score: 27 },
+      clinic_meta: {},
+    });
+
+    renderPanel();
+
+    await screen.findByText('31%');
+    expect(screen.getByText('58%')).toBeInTheDocument();
+    expect(screen.getByText('27%')).toBeInTheDocument();
+    expect(screen.getByText('0.0045')).toBeInTheDocument();
+    expect(screen.queryByText('3088%')).not.toBeInTheDocument();
+    expect(screen.queryByText('2700%')).not.toBeInTheDocument();
   });
 
   it('shows unavailable state and never fabricates zero metrics', async () => {

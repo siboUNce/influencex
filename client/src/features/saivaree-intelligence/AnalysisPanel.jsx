@@ -10,9 +10,21 @@ function formatCompact(value) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
 }
 
-function formatPercent(value) {
+function formatRatioPercent(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   return Math.round(Number(value) * 100) + '%';
+}
+
+function formatScorePercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Math.round(Number(value)) + '%';
+}
+
+function formatViewsPerFollower(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  const n = Number(value);
+  if (Math.abs(n) < 0.01 && n !== 0) return n.toFixed(4);
+  return n.toFixed(2);
 }
 
 function Metric({ label, value }) {
@@ -131,15 +143,17 @@ export default function AnalysisPanel({ kol }) {
                 ? '-'
                 : formatCompact(metrics.p25_views) + ' – ' + formatCompact(metrics.p75_views)}
             />
-            <Metric label={t('kol_db.analysis_consistency')} value={formatPercent(metrics.view_consistency)} />
-            <Metric label={t('kol_db.analysis_viral_dependency')} value={formatPercent(metrics.viral_dependency)} />
+            <Metric label={t('kol_db.analysis_consistency')} value={formatScorePercent(metrics.view_consistency)} />
+            <Metric label={t('kol_db.analysis_viral_dependency')} value={formatRatioPercent(metrics.viral_dependency)} />
             <Metric
               label={t('kol_db.analysis_views_follower')}
-              value={metrics.views_per_follower == null ? '-' : Number(metrics.views_per_follower).toFixed(2)}
+              value={formatViewsPerFollower(metrics.views_per_follower)}
             />
             <Metric
               label={t('kol_db.analysis_evidence_quality')}
-              value={formatPercent(evidence.confidence_score ?? evidence.data_completeness)}
+              value={evidence.confidence_score != null
+                ? formatScorePercent(evidence.confidence_score)
+                : formatRatioPercent(evidence.data_completeness)}
             />
             <Metric
               label={t('kol_db.analysis_sample_size')}
