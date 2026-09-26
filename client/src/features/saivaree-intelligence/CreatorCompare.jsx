@@ -11,9 +11,21 @@ function compact(value) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
 }
 
-function pct(value) {
+function ratioPercent(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   return Math.round(Number(value) * 100) + '%';
+}
+
+function scorePercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Math.round(Number(value)) + '%';
+}
+
+function viewsPerFollower(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  const n = Number(value);
+  if (Math.abs(n) < 0.01 && n !== 0) return n.toFixed(4);
+  return n.toFixed(2);
 }
 
 export default function CreatorCompare({ kols, onClose }) {
@@ -86,10 +98,12 @@ export default function CreatorCompare({ kols, onClose }) {
                           <td>{compact(metrics.median_views)}</td>
                           <td>{metrics.p25_views == null || metrics.p75_views == null ? '-' : compact(metrics.p25_views) + ' – ' + compact(metrics.p75_views)}</td>
                           <td>{compact(metrics.recent_weighted_median_views)}</td>
-                          <td>{pct(metrics.view_consistency)}</td>
-                          <td>{pct(metrics.viral_dependency)}</td>
-                          <td>{metrics.views_per_follower == null ? '-' : Number(metrics.views_per_follower).toFixed(2)}</td>
-                          <td>{pct(evidence.confidence_score ?? evidence.data_completeness)}</td>
+                          <td>{scorePercent(metrics.view_consistency)}</td>
+                          <td>{ratioPercent(metrics.viral_dependency)}</td>
+                          <td>{viewsPerFollower(metrics.views_per_follower)}</td>
+                          <td>{evidence.confidence_score != null
+                            ? scorePercent(evidence.confidence_score)
+                            : ratioPercent(evidence.data_completeness)}</td>
                         </>
                       )}
                     </tr>
