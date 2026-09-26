@@ -84,6 +84,11 @@ function useNavItems(user) {
       label: t('nav.apify_runs'),
       icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v5h5"/><path d="M21 12a9 9 0 0 0-15.7-6.3L3 8"/><path d="M21 21v-5h-5"/><path d="M3 12a9 9 0 0 0 15.7 6.3L21 16"/></svg>,
     });
+    items.push({
+      path: '/creator-intelligence-settings',
+      label: 'Creator Intelligence',
+      icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33A1.65 1.65 0 0 0 14 20.83V21a2 2 0 1 1-4 0v-.17A1.65 1.65 0 0 0 8.92 19.3a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15 1.65 1.65 0 0 0 3.09 14H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06A1.65 1.65 0 0 0 8.92 4.7H9A1.65 1.65 0 0 0 10 3.17V3a2 2 0 1 1 4 0v.17a1.65 1.65 0 0 0 1.08 1.53 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.12.37.49.63.88.63H21a2 2 0 1 1 0 4h-.72c-.39 0-.76.26-.88.63z"/></svg>,
+    });
   }
   return items;
 }
