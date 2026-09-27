@@ -175,9 +175,17 @@ export default function AnalysisPanel({ kol }) {
             />
           </div>
 
-          <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>
-            {t('kol_db.analysis_last_updated')}{' '}
-            {analysis.analyzed_at ? new Date(analysis.analyzed_at).toLocaleString() : '-'}
+          <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+            <span>
+              Sample window: {evidence.sample_window_days ? evidence.sample_window_days + ' days' : '-'}
+            </span>
+            <span>
+              Confidence: {evidence.confidence_grade ? String(evidence.confidence_grade).toUpperCase() : '-'}
+            </span>
+            <span>
+              {t('kol_db.analysis_last_updated')}{' '}
+              {analysis.analyzed_at ? new Date(analysis.analyzed_at).toLocaleString() : '-'}
+            </span>
           </div>
         </>
       )}

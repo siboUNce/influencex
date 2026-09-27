@@ -120,7 +120,11 @@ describe('AnalysisPanel', () => {
         views_per_follower: 0.0045303,
         sample_size: 5,
       },
-      evidence_quality: { confidence_score: 27 },
+      evidence_quality: {
+        confidence_score: 27,
+        sample_window_days: 90,
+        confidence_grade: 'high',
+      },
       clinic_meta: {},
     });
 
@@ -130,6 +134,8 @@ describe('AnalysisPanel', () => {
     expect(screen.getByText('58%')).toBeInTheDocument();
     expect(screen.getByText('27%')).toBeInTheDocument();
     expect(screen.getByText('0.0045')).toBeInTheDocument();
+    expect(screen.getByText(/sample window: 90 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/confidence: high/i)).toBeInTheDocument();
     expect(screen.queryByText('3088%')).not.toBeInTheDocument();
     expect(screen.queryByText('2700%')).not.toBeInTheDocument();
   });
