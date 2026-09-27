@@ -185,7 +185,7 @@ export const api = {
   getSaivareeAnalysis: (kolId) => request(`/saivaree/kols/${kolId}/analysis`),
   analyzeSaivareeKol: (kolId) => request(`/saivaree/kols/${kolId}/analyze`, { method: 'POST' }),
   compareSaivareeKols: (kolIds) => request('/saivaree/compare', { method: 'POST', body: { kol_ids: kolIds } }),
-  getSaivareeContactRecommendations: () => request('/saivaree/contact-recommendations'),
+  getSaivareeContactRecommendations: (campaignId) => request(`/saivaree/contact-recommendations?campaign_id=${encodeURIComponent(campaignId)}`),
   prepareSaivareeOutreach: (kolId, campaignId) => request(`/saivaree/kols/${kolId}/prepare-outreach`, { method: 'POST', body: { campaign_id: campaignId } }),
   getSaivareeSettings: () => request('/saivaree/settings'),
   updateSaivareeSettings: (data) => request('/saivaree/settings', { method: 'PUT', body: data }),

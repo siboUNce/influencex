@@ -19,6 +19,7 @@ const { runPendingMigrations } = require('../migrations');
 const {
   getSaivareeMeta,
   upsertSaivareeMeta,
+  evaluateCampaignFit,
   classifyContactRecommendation,
   compareContactRecommendations,
   createSaivareeHandlers,
@@ -381,6 +382,7 @@ function recommendationFixture({
   recent = 1000,
   consistency = 70,
   viral = 0.2,
+  fit = 'strong',
 } = {}) {
   const kol = {
     id: 'kol-' + username,
@@ -400,14 +402,102 @@ function recommendationFixture({
     },
     evidence_quality: { readiness, decision_ready },
   };
-  return { kol, meta, analysis };
+  return { kol, meta, analysis, campaignFit: { level: fit } };
 }
 
-test('contact recommendation policy gates outreach on readiness and clinic fit', () => {
+test('campaign fit is deterministic from campaign targeting and creator profile signals', () => {
+  assert.equal(evaluateCampaignFit({ campaign: { id: 'camp-a' }, kol: { source_campaign_id: 'camp-a' } }).level, 'strong');
+
+  const categoryFit = evaluateCampaignFit({
+    campaign: { id: 'camp-a', filter_criteria: JSON.stringify({ categories: 'skincare, hifu' }) },
+    kol: { category: 'Skincare' },
+  });
+  assert.equal(categoryFit.level, 'strong');
+  assert.ok(categoryFit.matched_terms.includes('skincare'));
+
+  const partialFit = evaluateCampaignFit({
+    campaign: { id: 'camp-a', name: 'Ulthera Lifting', description: '' },
+    kol: { bio: 'Beauty creator focused on lifting routines' },
+  });
+  assert.equal(partialFit.level, 'partial');
+  assert.deepEqual(partialFit.matched_terms, ['lifting']);
+
+  assert.equal(evaluateCampaignFit({
+    campaign: { id: 'camp-a', filter_criteria: { categories: 'skincare' } },
+    kol: { bio: 'Food and travel creator' },
+  }).level, 'none');
+  assert.equal(evaluateCampaignFit({
+    campaign: { id: 'camp-a', name: 'Clinic Campaign' },
+    kol: { bio: 'Anything' },
+  }).level, 'unknown');
+  assert.equal(evaluateCampaignFit({
+    campaign: { id: 'camp-a', filter_criteria: { categories: 'hifu' } },
+    kol: { tags: '[\"beauty\",\"hifu\"]' },
+  }).level, 'strong');
+  assert.equal(evaluateCampaignFit({
+    campaign: { id: 'camp-a', filter_criteria: { categories: 'hifu' } },
+    kol: { tags: 'beauty hifu skincare' },
+  }).level, 'strong');
+});
+
+test('same creator can be contact for one campaign and skip for another', () => {
+  const kol = { id: 'kol-same', platform: 'tiktok', username: 'same.creator', email: 'same@example.com', category: 'skincare' };
+  const analysis = {
+    analysis_status: 'available',
+    observed_metrics: { sample_size: 24 },
+    evidence_quality: { readiness: 'decision_grade', decision_ready: true },
+  };
+  const meta = { clinic_status: 'watching', clinic_rating: 5 };
+  const fitA = evaluateCampaignFit({ campaign: { id: 'camp-a', filter_criteria: { categories: 'skincare' } }, kol });
+  const fitB = evaluateCampaignFit({ campaign: { id: 'camp-b', filter_criteria: { categories: 'food' } }, kol });
+  assert.equal(classifyContactRecommendation({ kol, meta, analysis, campaignFit: fitA }).bucket, 'contact');
+  assert.equal(classifyContactRecommendation({ kol, meta, analysis, campaignFit: fitB }).bucket, 'skip');
+});
+
+test('ai_score cannot change contact classification or ordering', () => {
+  const low = recommendationFixture({ ai_score: 0, username: 'zulu', recent: 5000 });
+  const high = recommendationFixture({ ai_score: 99, username: 'alpha', recent: 1000 });
+  assert.equal(classifyContactRecommendation(low).bucket, 'contact');
+  assert.equal(classifyContactRecommendation(high).bucket, 'contact');
+  const baseRows = [
+    { username: 'zulu', bucket: 'contact', ai_score: 0, campaign_fit: { level: 'strong' }, observed_metrics: { recent_weighted_median_views: 5000 } },
+    { username: 'alpha', bucket: 'contact', ai_score: 99, campaign_fit: { level: 'strong' }, observed_metrics: { recent_weighted_median_views: 1000 } },
+  ];
+  const first = baseRows.map(row => ({ ...row })).sort(compareContactRecommendations).map(row => row.username);
+  const swapped = baseRows.map(row => ({ ...row, ai_score: row.ai_score === 0 ? 99 : 0 })).sort(compareContactRecommendations).map(row => row.username);
+  assert.deepEqual(first, ['zulu', 'alpha']);
+  assert.deepEqual(swapped, first);
+});
+
+test('contact sorter uses objective Creator Intelligence signals in the declared order', () => {
+  const strong = { bucket: 'contact', campaign_fit: { level: 'strong' }, clinic_status: 'watching' };
+  const rows = [
+    { ...strong, username: 'recent-low', observed_metrics: { recent_weighted_median_views: 100 } },
+    { ...strong, username: 'recent-high', observed_metrics: { recent_weighted_median_views: 200 } },
+    { ...strong, username: 'consistency-low', observed_metrics: { recent_weighted_median_views: 50, view_consistency: 40 } },
+    { ...strong, username: 'consistency-high', observed_metrics: { recent_weighted_median_views: 50, view_consistency: 80 } },
+    { ...strong, username: 'viral-high', observed_metrics: { recent_weighted_median_views: 40, view_consistency: 70, viral_dependency: 0.8 } },
+    { ...strong, username: 'viral-low', observed_metrics: { recent_weighted_median_views: 40, view_consistency: 70, viral_dependency: 0.1 } },
+    { ...strong, username: 'vpf-low', observed_metrics: { recent_weighted_median_views: 30, view_consistency: 60, viral_dependency: 0.2, views_per_follower: 0.2 } },
+    { ...strong, username: 'vpf-high', observed_metrics: { recent_weighted_median_views: 30, view_consistency: 60, viral_dependency: 0.2, views_per_follower: 0.8 } },
+    { ...strong, username: 'sample-low', observed_metrics: { recent_weighted_median_views: 20, view_consistency: 50, viral_dependency: 0.2, views_per_follower: 0.5, sample_size: 20 } },
+    { ...strong, username: 'sample-high', observed_metrics: { recent_weighted_median_views: 20, view_consistency: 50, viral_dependency: 0.2, views_per_follower: 0.5, sample_size: 30 } },
+  ];
+  rows.sort(compareContactRecommendations);
+  assert.deepEqual(rows.map(row => row.username), [
+    'recent-high', 'recent-low', 'consistency-high', 'consistency-low',
+    'viral-low', 'viral-high', 'vpf-high', 'vpf-low', 'sample-high', 'sample-low',
+  ]);
+});
+
+test('contact recommendation policy gates outreach on readiness and campaign fit', () => {
   const cases = [
-    [{ clinic_status: 'interested' }, 'contact'],
-    [{ clinic_rating: 4 }, 'contact'],
-    [{ clinic_rating: null, ai_score: 50 }, 'contact'],
+    [{ ai_score: 0 }, 'contact'],
+    [{ fit: 'partial', ai_score: 99 }, 'review'],
+    [{ fit: 'none', ai_score: 99 }, 'skip'],
+    [{ fit: 'unknown', clinic_status: 'interested', clinic_rating: 5 }, 'review'],
+    [{ fit: 'partial', clinic_status: 'interested', clinic_rating: 5 }, 'review'],
+    [{ fit: 'none', clinic_status: 'interested', clinic_rating: 5 }, 'skip'],
     [{ readiness: 'directional', decision_ready: false, ai_score: 99 }, 'review'],
     [{ readiness: 'insufficient', decision_ready: false }, 'need_more_data'],
     [{ analysis_status: 'missing', readiness: null, decision_ready: false }, 'need_more_data'],
@@ -455,12 +545,12 @@ test('contact recommendation sorter is deterministic and transparent', () => {
   ];
 
   rows.sort(compareContactRecommendations);
-  assert.deepEqual(rows.map(row => row.username), ['bravo', 'charlie', 'alpha', 'delta']);
+  assert.deepEqual(rows.map(row => row.username), ['charlie', 'bravo', 'alpha', 'delta']);
 });
 
 test('contact recommendations list uses cached analysis only and survives one analyzer failure', async () => {
   const kols = [
-    { id: 'kol-a', workspace_id: 'ws-a', platform: 'tiktok', username: 'alpha', email: 'a@example.com', ai_score: 80 },
+    { id: 'kol-a', workspace_id: 'ws-a', platform: 'tiktok', username: 'alpha', email: 'a@example.com', category: 'skincare', ai_score: 0 },
     { id: 'kol-b', workspace_id: 'ws-a', platform: 'tiktok', username: 'bravo', email: 'b@example.com', ai_score: 80 },
   ];
   const metaByKol = {
@@ -480,6 +570,11 @@ test('contact recommendations list uses cached analysis only and survives one an
       return { rows: kols };
     },
     async queryOne(sql, params) {
+      if (/FROM campaigns/i.test(sql)) {
+        assert.match(sql, /workspace_id\s*=\s*\?/i);
+        assert.deepEqual(params, ['camp-1', 'ws-a']);
+        return { id: 'camp-1', filter_criteria: { categories: 'skincare' } };
+      }
       if (/FROM saivaree_kol_meta/i.test(sql)) return metaByKol[params[1]] || null;
       return null;
     },
@@ -505,7 +600,7 @@ test('contact recommendations list uses cached analysis only and survives one an
   const handlers = createSaivareeHandlers({ db: fakeDb, analyzer, randomUUID: () => 'uuid-1' });
   const res = makeRes();
 
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' } }, res);
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' }, query: { campaign_id: 'camp-1' } }, res);
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.summary.contact, 1);
@@ -513,6 +608,75 @@ test('contact recommendations list uses cached analysis only and survives one an
   assert.equal(res.body.creators.find(row => row.kol_id === 'kol-b').bucket, 'need_more_data');
   assert.ok(res.body.creators.find(row => row.kol_id === 'kol-b').reason_codes.includes('analyzer_unavailable'));
   assert.equal(analyzeCalls, 0);
+});
+
+test('contact recommendations require a workspace-scoped campaign before reading Analyzer', async () => {
+  let analyzerCalls = 0;
+  const fakeDb = {
+    async query() { throw new Error('KOL list must not load without a valid campaign'); },
+    async queryOne() { return null; },
+    async exec() {},
+  };
+  const analyzer = {
+    async getAnalysis() { analyzerCalls += 1; },
+    async analyze() { analyzerCalls += 1; },
+  };
+  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer });
+
+  const missingRes = makeRes();
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' }, query: {} }, missingRes);
+  assert.equal(missingRes.statusCode, 400);
+  assert.equal(missingRes.body.code, 'campaign_required');
+
+  const foreignRes = makeRes();
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' }, query: { campaign_id: 'foreign' } }, foreignRes);
+  assert.equal(foreignRes.statusCode, 404);
+  assert.equal(analyzerCalls, 0);
+});
+
+test('prepare outreach recomputes campaign fit and refuses a creator that only fits another campaign', async () => {
+  const kol = {
+    id: 'kol-1', workspace_id: 'ws-a', platform: 'tiktok', username: 'skin.creator',
+    email: 'skin@example.com', category: 'skincare', source_campaign_id: 'camp-a',
+  };
+  const meta = {
+    workspace_id: 'ws-a', kol_database_id: 'kol-1', platform: 'tiktok', username: 'skin.creator',
+    saivaree_creator_id: 'creator-1', clinic_status: 'interested', clinic_rating: 5,
+  };
+  const fakeDb = {
+    async queryOne(sql, params) {
+      if (/FROM kol_database/i.test(sql)) return kol;
+      if (/FROM campaigns/i.test(sql)) {
+        assert.deepEqual(params, ['camp-b', 'ws-a']);
+        return { id: 'camp-b', filter_criteria: { categories: 'food' } };
+      }
+      if (/FROM saivaree_kol_meta/i.test(sql)) return meta;
+      return null;
+    },
+    async exec() { throw new Error('must not write'); },
+  };
+  const analyzer = {
+    async getAnalysis() {
+      return {
+        analysis_status: 'available',
+        observed_metrics: { sample_size: 24, recent_weighted_median_views: 5000 },
+        evidence_quality: { readiness: 'decision_grade', decision_ready: true },
+      };
+    },
+    async analyze() { throw new Error('must not analyze'); },
+  };
+  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer });
+  const res = makeRes();
+
+  await handlers.prepareOutreach({
+    workspace: { id: 'ws-a' },
+    params: { kolId: 'kol-1' },
+    body: { campaign_id: 'camp-b' },
+  }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, 'not_contact_ready');
+  assert.equal(res.body.bucket, 'skip');
 });
 
 test('prepare outreach refuses creator that is not contact ready', async () => {
@@ -555,7 +719,7 @@ test('prepare outreach refuses creator that is not contact ready', async () => {
 });
 
 test('prepare outreach refuses contact-ready creator without email', async () => {
-  const kol = { id: 'kol-1', workspace_id: 'ws-a', platform: 'tiktok', username: 'creator', email: '', ai_score: 80 };
+  const kol = { id: 'kol-1', workspace_id: 'ws-a', platform: 'tiktok', username: 'creator', email: '', source_campaign_id: 'camp-1', ai_score: 80 };
   const meta = {
     workspace_id: 'ws-a', kol_database_id: 'kol-1', platform: 'tiktok', username: 'creator',
     saivaree_creator_id: 'creator-1', clinic_status: 'interested', clinic_rating: null,
@@ -603,10 +767,10 @@ test('prepare outreach creates one workspace-scoped draft and reuses it', async 
   );
   await exec(
     `INSERT INTO kol_database
-     (id, workspace_id, platform, username, display_name, profile_url, email, ai_score, scrape_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, workspace_id, platform, username, display_name, profile_url, email, ai_score, scrape_status, source_campaign_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [databaseKolId, workspaceId, 'tiktok', 'ready.creator', 'Ready Creator',
-      'https://www.tiktok.com/@ready.creator', 'ready@example.com', 80, 'complete']
+      'https://www.tiktok.com/@ready.creator', 'ready@example.com', 80, 'complete', campaignId]
   );
   await exec(
     `INSERT INTO saivaree_kol_meta

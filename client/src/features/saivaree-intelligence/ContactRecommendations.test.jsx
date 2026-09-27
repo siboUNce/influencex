@@ -38,13 +38,15 @@ function row(overrides = {}) {
     clinic_rating: 4,
     bucket: 'contact',
     contactable: true,
-    reason_codes: ['clinic_rating_strong'],
+    reason_codes: ['campaign_fit_strong'],
+    campaign_fit: { level: 'strong', matched_terms: ['skincare'], reason_codes: ['category_match'] },
     analysis_status: 'available',
     observed_metrics: {
       sample_size: 20,
       recent_weighted_median_views: 5000,
       view_consistency: 75,
       viral_dependency: 0.2,
+      views_per_follower: 0.5,
     },
     evidence_quality: {
       readiness: 'decision_grade',
@@ -70,8 +72,8 @@ function renderPanel(props = {}) {
   return render(
     <I18nProvider>
       <ContactRecommendations
-        selectedCampaignId={props.selectedCampaignId}
-        selectedCampaign={props.selectedCampaign}
+        selectedCampaignId={props.selectedCampaignId === undefined ? 'camp-1' : props.selectedCampaignId}
+        selectedCampaign={props.selectedCampaign || { id: 'camp-1', name: 'Clinic Campaign' }}
         onOpen={props.onOpen || vi.fn()}
         onClose={props.onClose || vi.fn()}
       />
@@ -102,15 +104,18 @@ describe('ContactRecommendations', () => {
     expect(screen.getAllByText('Review').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Need more data').length).toBeGreaterThan(0);
     expect(api.getSaivareeContactRecommendations).toHaveBeenCalledTimes(1);
+    expect(api.getSaivareeContactRecommendations).toHaveBeenCalledWith('camp-1');
     expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
   });
 
-  it('disables draft preparation until a campaign is selected', async () => {
+  it('does not load recommendations until a campaign is selected', async () => {
     api.getSaivareeContactRecommendations.mockResolvedValue(result([row()]));
 
-    renderPanel();
+    renderPanel({ selectedCampaignId: null });
 
-    expect(await screen.findByRole('button', { name: 'Select campaign' })).toBeDisabled();
+    expect(screen.getByText('Select a campaign first.')).toBeInTheDocument();
+    expect(api.getSaivareeContactRecommendations).not.toHaveBeenCalled();
+    expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
   });
 
   it('disables draft preparation when the creator has no email', async () => {
@@ -149,12 +154,12 @@ describe('ContactRecommendations', () => {
     expect(screen.getByRole('button', { name: 'Draft ready' })).toBeDisabled();
   });
 
-  it('opens a review creator without auto-analyzing', async () => {
+  it.each(['review', 'need_more_data'])('opens a %s creator without auto-analyzing', async (bucket) => {
     const user = userEvent.setup();
     const onOpen = vi.fn();
     const onClose = vi.fn();
     api.getSaivareeContactRecommendations.mockResolvedValue(result([
-      row({ kol_id: 'kol-review', username: 'review.one', bucket: 'review', contactable: false }),
+      row({ kol_id: 'kol-review', username: 'review.one', bucket, contactable: false }),
     ]));
 
     renderPanel({ onOpen, onClose });
