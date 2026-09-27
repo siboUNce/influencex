@@ -6,7 +6,8 @@
  *   - apify/instagram-profile-scraper
  *   - clockworks/tiktok-scraper (or equivalent)
  *
- * Set APIFY_TOKEN to enable. If unset, all methods return
+ * Set APIFY_TOKEN or use apify_token from INFLUENCEX_RUNTIME_SETTINGS_PATH.
+ * If neither is available, all methods return
  *   { success: false, error: 'Apify not configured' }
  * so the caller can fall back to their existing scraper.
  *
@@ -17,11 +18,26 @@
 
 const fetch = require('./proxy-fetch');
 const { v4: uuidv4 } = require('uuid');
-const APIFY_TOKEN = process.env.APIFY_TOKEN;
+const fs = require('node:fs');
 const DEFAULT_TIMEOUT_MS = 60_000;
 
+// Resolve on use so Settings updates (including atomic file replacement) apply
+// without a restart. An explicit environment token takes precedence.
+function resolveToken() {
+  if (process.env.APIFY_TOKEN) return process.env.APIFY_TOKEN;
+  const settingsPath = process.env.INFLUENCEX_RUNTIME_SETTINGS_PATH;
+  if (!settingsPath) return '';
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    return typeof settings?.apify_token === 'string' ? settings.apify_token.trim() : '';
+  } catch {
+    // Missing, unreadable or malformed settings must not break capability checks.
+    return '';
+  }
+}
+
 function isConfigured() {
-  return !!APIFY_TOKEN;
+  return !!resolveToken();
 }
 
 // Try to require database lazily so unit tests can mock or skip.
@@ -63,8 +79,9 @@ async function persistRunFinish(persistence, id, patch) {
 }
 
 async function runActor(actorId, input, { timeoutMs = DEFAULT_TIMEOUT_MS, workspaceId, persistence } = {}) {
-  if (!isConfigured()) {
-    return { success: false, error: 'Apify not configured (set APIFY_TOKEN)' };
+  const token = resolveToken();
+  if (!token) {
+    return { success: false, error: 'Apify not configured (set APIFY_TOKEN or configure runtime settings)' };
   }
 
   const persist = persistence || getPersistence();
@@ -72,7 +89,7 @@ async function runActor(actorId, input, { timeoutMs = DEFAULT_TIMEOUT_MS, worksp
   const startedAt = Date.now();
   await persistRunStart(persist, { id: runId, workspaceId, actorId, input });
 
-  const url = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items?token=${APIFY_TOKEN}&timeout=${Math.floor(timeoutMs / 1000)}`;
+  const url = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}&timeout=${Math.floor(timeoutMs / 1000)}`;
 
   try {
     const controller = new AbortController();

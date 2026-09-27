@@ -332,10 +332,10 @@ async function scrapeTikTok(profileUrl, username, opts = {}) {
 
     return {
       success: false,
-      error: 'Could not fetch TikTok profile data. TikTok may be blocking server requests. Configure MODASH_API_KEY for reliable TikTok data.',
+      error: 'Could not fetch TikTok profile data. TikTok may be blocking server requests. Check Apify runtime settings / APIFY_TOKEN or MODASH_API_KEY for reliable TikTok data.',
     };
   } catch (e) {
-    return { success: false, error: `TikTok fetch error: ${e.message}. Configure MODASH_API_KEY for reliable data.` };
+    return { success: false, error: `TikTok fetch error: ${e.message}. Check Apify runtime settings / APIFY_TOKEN or MODASH_API_KEY for reliable data.` };
   }
 }
 
