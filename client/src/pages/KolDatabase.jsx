@@ -490,8 +490,24 @@ function formatKolDetailScore(kol, value) {
   return value;
 }
 
-function KolDetailModal({ kol, onClose }) {
+function KolDetailModal({ kol, onClose, onUpdated }) {
   const { t } = useI18n();
+  const [savingPlatform, setSavingPlatform] = useState(false);
+  const [platformError, setPlatformError] = useState(null);
+
+  const setTikTokPlatform = async () => {
+    setSavingPlatform(true);
+    setPlatformError(null);
+    try {
+      const updated = await api.updateKolDatabasePlatform(kol.id, 'tiktok');
+      onUpdated?.(updated);
+    } catch (error) {
+      setPlatformError(error.message || 'Unable to update platform');
+    } finally {
+      setSavingPlatform(false);
+    }
+  };
+
   return (
     <Modal onClose={onClose} labelledBy="kol-detail-modal-title" style={{ maxWidth: '800px' }}>
         <div className="modal-header">
