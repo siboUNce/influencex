@@ -63,6 +63,23 @@ describe('AnalysisPanel', () => {
     expect(screen.getByText(/analysis queued/i)).toBeInTheDocument();
   });
 
+  it('treats 429 from Analyze as already queued instead of an error', async () => {
+    const user = userEvent.setup();
+    api.getSaivareeAnalysis.mockResolvedValue({ analysis_status: 'missing' });
+    const error = new Error('too many requests');
+    error.statusCode = 429;
+    api.analyzeSaivareeKol.mockRejectedValue(error);
+
+    renderPanel();
+
+    const analyzeButton = await screen.findByRole('button', { name: /^analyze$/i });
+    await user.click(analyzeButton);
+
+    expect(await screen.findByText(/analysis queued/i)).toBeInTheDocument();
+    expect(screen.queryByText(/unable to start analysis/i)).not.toBeInTheDocument();
+    expect(analyzeButton).toBeDisabled();
+  });
+
   it('renders persisted metrics without coercing missing values to zero', async () => {
     api.getSaivareeAnalysis.mockResolvedValue({
       analysis_status: 'available',

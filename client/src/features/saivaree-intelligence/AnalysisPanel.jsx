@@ -79,7 +79,8 @@ export default function AnalysisPanel({ kol }) {
       await api.analyzeSaivareeKol(kol.id);
       setQueued(true);
     } catch (err) {
-      if (err?.statusCode === 503) setError('unavailable');
+      if (err?.statusCode === 429) setQueued(true);
+      else if (err?.statusCode === 503) setError('unavailable');
       else setError('run');
     } finally {
       setRunning(false);
@@ -103,7 +104,7 @@ export default function AnalysisPanel({ kol }) {
             {t('kol_db.analysis_subtitle')}
           </div>
         </div>
-        <button type="button" className="btn btn-sm btn-primary" onClick={handleAnalyze} disabled={running || !supportedPlatform}>
+        <button type="button" className="btn btn-sm btn-primary" onClick={handleAnalyze} disabled={running || queued || !supportedPlatform}>
           {running
             ? t('kol_db.analysis_running')
             : hasAnalysis
