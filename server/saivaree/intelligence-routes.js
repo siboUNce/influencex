@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { createAnalyzerClient } = require('./analyzer-client');
+const { renderPersonalizedEmail } = require('../agents-v2/kol-outreach');
 
 const CLINIC_STATUSES = new Set([
   'watching',
@@ -10,6 +11,149 @@ const CLINIC_STATUSES = new Set([
   'worked_with',
   'not_selected',
 ]);
+
+const CONTACT_BUCKET_ORDER = new Map([
+  ['contact', 0],
+  ['review', 1],
+  ['need_more_data', 2],
+  ['already_contacted', 3],
+  ['skip', 4],
+]);
+
+function numericOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function compareDescNullable(a, b) {
+  const left = numericOrNull(a);
+  const right = numericOrNull(b);
+  if (left === right) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return right - left;
+}
+
+function classifyContactRecommendation({ kol = {}, meta = {}, analysis = {} }) {
+  const clinicStatus = meta?.clinic_status || 'watching';
+  const clinicRating = numericOrNull(meta?.clinic_rating);
+  const aiScore = numericOrNull(kol?.ai_score) ?? 0;
+  const evidence = analysis?.evidence_quality || {};
+  const readiness = evidence.readiness || null;
+  const analysisStatus = analysis?.analysis_status || 'missing';
+  const platform = String(kol?.platform || '').toLowerCase();
+  const reasons = [];
+
+  let bucket;
+
+  if (clinicStatus === 'contacted' || clinicStatus === 'worked_with') {
+    bucket = 'already_contacted';
+    reasons.push(clinicStatus === 'worked_with' ? 'clinic_worked_with' : 'clinic_already_contacted');
+  } else if (clinicStatus === 'not_selected' || (clinicRating !== null && clinicRating <= 2)) {
+    bucket = 'skip';
+    if (clinicStatus === 'not_selected') reasons.push('clinic_not_selected');
+    if (clinicRating !== null && clinicRating <= 2) reasons.push('clinic_rating_low');
+  } else if (platform !== 'tiktok') {
+    bucket = 'need_more_data';
+    reasons.push('unsupported_platform');
+  } else if (analysisStatus === 'analyzer_unavailable') {
+    bucket = 'need_more_data';
+    reasons.push('analyzer_unavailable');
+  } else if (analysisStatus !== 'available') {
+    bucket = 'need_more_data';
+    reasons.push('analysis_missing');
+  } else if (!readiness) {
+    bucket = 'need_more_data';
+    reasons.push('readiness_missing');
+  } else if (readiness === 'insufficient') {
+    bucket = 'need_more_data';
+    reasons.push('insufficient_evidence');
+  } else if (readiness === 'directional' || evidence.decision_ready !== true) {
+    bucket = 'review';
+    reasons.push(readiness === 'directional' ? 'directional_evidence' : 'not_decision_ready');
+  } else if (readiness === 'decision_grade' && evidence.decision_ready === true) {
+    if (clinicStatus === 'interested') {
+      bucket = 'contact';
+      reasons.push('clinic_interested');
+    } else if (clinicRating !== null && clinicRating >= 4) {
+      bucket = 'contact';
+      reasons.push('clinic_rating_strong');
+    } else if (clinicRating === 3) {
+      bucket = 'review';
+      reasons.push('clinic_rating_neutral');
+    } else if (clinicRating === null && aiScore >= 50) {
+      bucket = 'contact';
+      reasons.push('ai_score_fallback');
+    } else {
+      bucket = 'review';
+      reasons.push('fit_below_threshold');
+    }
+  } else {
+    bucket = 'review';
+    reasons.push('unrecognized_readiness');
+  }
+
+  const hasEmail = typeof kol?.email === 'string' && kol.email.trim().length > 0;
+  const contactable = bucket === 'contact' && hasEmail;
+  if (bucket === 'contact' && !hasEmail) reasons.push('missing_email');
+
+  return {
+    bucket,
+    contactable,
+    reason_codes: reasons,
+  };
+}
+
+function compareContactRecommendations(a, b) {
+  const bucketDiff =
+    (CONTACT_BUCKET_ORDER.get(a.bucket) ?? 99) -
+    (CONTACT_BUCKET_ORDER.get(b.bucket) ?? 99);
+  if (bucketDiff !== 0) return bucketDiff;
+
+  if (a.bucket === 'contact' || a.bucket === 'review') {
+    const interestedDiff =
+      Number(b.clinic_status === 'interested') - Number(a.clinic_status === 'interested');
+    if (interestedDiff !== 0) return interestedDiff;
+
+    const aRating = numericOrNull(a.clinic_rating);
+    const bRating = numericOrNull(b.clinic_rating);
+    if (aRating !== bRating) {
+      if (aRating === null) return 1;
+      if (bRating === null) return -1;
+      return bRating - aRating;
+    }
+
+    const aiDiff = compareDescNullable(a.ai_score, b.ai_score);
+    if (aiDiff !== 0) return aiDiff;
+
+    const aMetrics = a.observed_metrics || {};
+    const bMetrics = b.observed_metrics || {};
+    const recentDiff = compareDescNullable(
+      aMetrics.recent_weighted_median_views,
+      bMetrics.recent_weighted_median_views
+    );
+    if (recentDiff !== 0) return recentDiff;
+
+    const consistencyDiff = compareDescNullable(
+      aMetrics.view_consistency,
+      bMetrics.view_consistency
+    );
+    if (consistencyDiff !== 0) return consistencyDiff;
+
+    const aViral = numericOrNull(aMetrics.viral_dependency);
+    const bViral = numericOrNull(bMetrics.viral_dependency);
+    if (aViral !== bViral) {
+      if (aViral === null) return 1;
+      if (bViral === null) return -1;
+      return aViral - bViral;
+    }
+  }
+
+  return String(a.username || '').localeCompare(String(b.username || ''), 'en', {
+    sensitivity: 'base',
+  });
+}
 
 async function getSaivareeMeta(db, workspaceId, kolId) {
   return db.queryOne(
@@ -154,6 +298,55 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     return meta;
   }
 
+  async function buildRecommendationForKol(workspaceId, kol) {
+    let meta = await getSaivareeMeta(db, workspaceId, kol.id);
+    if (!meta) {
+      meta = {
+        workspace_id: workspaceId,
+        kol_database_id: kol.id,
+        platform: kol.platform,
+        username: kol.username,
+        saivaree_creator_id: null,
+        clinic_status: 'watching',
+        clinic_rating: null,
+        clinic_notes: null,
+      };
+    }
+
+    let analysis = { analysis_status: 'missing' };
+
+    if (String(kol.platform || '').toLowerCase() === 'tiktok') {
+      try {
+        if (!meta.saivaree_creator_id) {
+          meta = await resolveMapping(workspaceId, kol);
+        }
+        if (meta?.saivaree_creator_id) {
+          analysis = await analyzer.getAnalysis(meta.saivaree_creator_id);
+        }
+      } catch (_error) {
+        analysis = { analysis_status: 'analyzer_unavailable' };
+      }
+    }
+
+    const classification = classifyContactRecommendation({ kol, meta, analysis });
+
+    return {
+      kol_id: kol.id,
+      username: kol.username,
+      display_name: kol.display_name || kol.username,
+      platform: kol.platform,
+      email: kol.email || '',
+      followers: numericOrNull(kol.followers) ?? 0,
+      ai_score: numericOrNull(kol.ai_score) ?? 0,
+      clinic_status: meta?.clinic_status || 'watching',
+      clinic_rating: numericOrNull(meta?.clinic_rating),
+      ...classification,
+      analysis_status: analysis?.analysis_status || 'missing',
+      observed_metrics: analysis?.observed_metrics || {},
+      evidence_quality: analysis?.evidence_quality || {},
+    };
+  }
+
   async function getMeta(req, res) {
     const workspaceId = req.workspace.id;
     const kol = await loadWorkspaceKol(db, workspaceId, req.params.kolId);
@@ -255,6 +448,161 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     }
   }
 
+  async function getContactRecommendations(req, res) {
+    try {
+      const workspaceId = req.workspace.id;
+      const result = await db.query(
+        `SELECT *
+         FROM kol_database
+         WHERE workspace_id = ?
+         ORDER BY username ASC`,
+        [workspaceId]
+      );
+
+      const creators = [];
+      for (const kol of result.rows || []) {
+        creators.push(await buildRecommendationForKol(workspaceId, kol));
+      }
+      creators.sort(compareContactRecommendations);
+
+      const summary = {
+        contact: 0,
+        review: 0,
+        need_more_data: 0,
+        already_contacted: 0,
+        skip: 0,
+      };
+      for (const creator of creators) {
+        if (Object.prototype.hasOwnProperty.call(summary, creator.bucket)) {
+          summary[creator.bucket] += 1;
+        }
+      }
+
+      return res.json({ summary, creators });
+    } catch (_error) {
+      return res.status(500).json({ error: 'Unable to load contact recommendations' });
+    }
+  }
+
+  async function prepareOutreach(req, res) {
+    try {
+      const workspaceId = req.workspace.id;
+      const campaignId = req.body?.campaign_id;
+      if (!campaignId) {
+        return res.status(400).json({
+          error: 'campaign_id is required',
+          code: 'campaign_required',
+        });
+      }
+
+      const kol = await loadWorkspaceKol(db, workspaceId, req.params.kolId);
+      if (!kol) return res.status(404).json({ error: 'KOL not found' });
+
+      const campaign = await db.queryOne(
+        'SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?',
+        [campaignId, workspaceId]
+      );
+      if (!campaign) {
+        return res.status(404).json({ error: 'Campaign not found in this workspace' });
+      }
+
+      const recommendation = await buildRecommendationForKol(workspaceId, kol);
+      if (recommendation.bucket !== 'contact') {
+        return res.status(409).json({
+          error: 'Creator is not ready for outreach',
+          code: 'not_contact_ready',
+          bucket: recommendation.bucket,
+        });
+      }
+      if (!recommendation.contactable) {
+        return res.status(409).json({
+          error: 'Creator has no email address',
+          code: 'missing_email',
+        });
+      }
+
+      let campaignKol = await db.queryOne(
+        `SELECT *
+         FROM kols
+         WHERE workspace_id = ? AND campaign_id = ? AND platform = ? AND username = ?
+         ORDER BY collected_at ASC
+         LIMIT 1`,
+        [workspaceId, campaignId, kol.platform, kol.username]
+      );
+
+      if (!campaignKol) {
+        const campaignKolId = randomUUID();
+        await db.exec(
+          `INSERT INTO kols
+           (id, workspace_id, campaign_id, platform, username, display_name, avatar_url,
+            followers, engagement_rate, avg_views, category, email, profile_url, bio,
+            ai_score, ai_reason, estimated_cpm, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')`,
+          [
+            campaignKolId,
+            workspaceId,
+            campaignId,
+            kol.platform,
+            kol.username,
+            kol.display_name || kol.username,
+            kol.avatar_url || '',
+            numericOrNull(kol.followers) ?? 0,
+            numericOrNull(kol.engagement_rate) ?? 0,
+            numericOrNull(kol.avg_views) ?? 0,
+            kol.category || '',
+            kol.email,
+            kol.profile_url || '',
+            kol.bio || '',
+            numericOrNull(kol.ai_score) ?? 0,
+            kol.ai_reason || '',
+            numericOrNull(kol.estimated_cpm) ?? 0,
+          ]
+        );
+        campaignKol = {
+          ...kol,
+          id: campaignKolId,
+          workspace_id: workspaceId,
+          campaign_id: campaignId,
+          status: 'approved',
+        };
+      }
+
+      const existing = await db.queryOne(
+        `SELECT id, status
+         FROM contacts
+         WHERE workspace_id = ? AND campaign_id = ? AND kol_id = ?
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [workspaceId, campaignId, campaignKol.id]
+      );
+      if (existing) {
+        return res.json({
+          contact_id: existing.id,
+          created: false,
+          status: existing.status,
+        });
+      }
+
+      const { subject, body } = renderPersonalizedEmail({ kol: campaignKol, campaign });
+      const contactId = randomUUID();
+      await db.exec(
+        `INSERT INTO contacts
+         (id, workspace_id, kol_id, campaign_id, email_subject, email_body,
+          cooperation_type, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'affiliate', 'draft')`,
+        [contactId, workspaceId, campaignKol.id, campaignId, subject, body]
+      );
+
+      return res.status(201).json({
+        contact_id: contactId,
+        created: true,
+        status: 'draft',
+      });
+    } catch (_error) {
+      return res.status(500).json({ error: 'Unable to prepare outreach draft' });
+    }
+  }
+
   async function compare(req, res) {
     try {
       const ids = Array.isArray(req.body?.kol_ids) ? req.body.kol_ids : [];
@@ -304,6 +652,8 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     patchMeta,
     getAnalysis,
     analyze,
+    getContactRecommendations,
+    prepareOutreach,
     compare,
   };
 }
@@ -337,6 +687,16 @@ function registerSaivareeIntelligenceRoutes(app, {
     `${basePath}/api/saivaree/kols/:kolId/analyze`,
     rbac.requirePermission('kol.update'),
     handlers.analyze
+  );
+  app.get(
+    `${basePath}/api/saivaree/contact-recommendations`,
+    rbac.requirePermission('kol.read'),
+    handlers.getContactRecommendations
+  );
+  app.post(
+    `${basePath}/api/saivaree/kols/:kolId/prepare-outreach`,
+    rbac.requirePermission('contact.create'),
+    handlers.prepareOutreach
   );
   app.post(
     `${basePath}/api/saivaree/compare`,
@@ -407,6 +767,8 @@ module.exports = {
   getSaivareeMeta,
   upsertSaivareeMeta,
   loadWorkspaceKol,
+  classifyContactRecommendation,
+  compareContactRecommendations,
   createSaivareeHandlers,
   registerSaivareeIntelligenceRoutes,
 };

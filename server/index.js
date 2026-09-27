@@ -1148,7 +1148,7 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
 
 registerSaivareeIntelligenceRoutes(app, {
   basePath: BASE_PATH,
-  db: { queryOne, exec },
+  db: { query, queryOne, exec },
   rbac,
   platformAdmin: requirePlatformAdmin,
 });

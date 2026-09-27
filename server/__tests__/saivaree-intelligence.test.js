@@ -19,6 +19,8 @@ const { runPendingMigrations } = require('../migrations');
 const {
   getSaivareeMeta,
   upsertSaivareeMeta,
+  classifyContactRecommendation,
+  compareContactRecommendations,
   createSaivareeHandlers,
   registerSaivareeIntelligenceRoutes,
 } = require('../saivaree/intelligence-routes');
@@ -367,6 +369,323 @@ test('compare handler reads cached analysis only', async () => {
 });
 
 
+function recommendationFixture({
+  clinic_status = 'watching',
+  clinic_rating = null,
+  ai_score = 60,
+  email = 'creator@example.com',
+  readiness = 'decision_grade',
+  decision_ready = true,
+  analysis_status = 'available',
+  username = 'creator',
+  recent = 1000,
+  consistency = 70,
+  viral = 0.2,
+} = {}) {
+  const kol = {
+    id: 'kol-' + username,
+    platform: 'tiktok',
+    username,
+    email,
+    ai_score,
+  };
+  const meta = { clinic_status, clinic_rating };
+  const analysis = {
+    analysis_status,
+    observed_metrics: {
+      recent_weighted_median_views: recent,
+      view_consistency: consistency,
+      viral_dependency: viral,
+      sample_size: readiness === 'decision_grade' ? 20 : readiness === 'directional' ? 15 : 5,
+    },
+    evidence_quality: { readiness, decision_ready },
+  };
+  return { kol, meta, analysis };
+}
+
+test('contact recommendation policy gates outreach on readiness and clinic fit', () => {
+  const cases = [
+    [{ clinic_status: 'interested' }, 'contact'],
+    [{ clinic_rating: 4 }, 'contact'],
+    [{ clinic_rating: null, ai_score: 50 }, 'contact'],
+    [{ readiness: 'directional', decision_ready: false, ai_score: 99 }, 'review'],
+    [{ readiness: 'insufficient', decision_ready: false }, 'need_more_data'],
+    [{ analysis_status: 'missing', readiness: null, decision_ready: false }, 'need_more_data'],
+    [{ clinic_status: 'not_selected' }, 'skip'],
+    [{ clinic_rating: 2 }, 'skip'],
+    [{ clinic_status: 'contacted' }, 'already_contacted'],
+    [{ clinic_status: 'worked_with' }, 'already_contacted'],
+  ];
+
+  for (const [patch, expected] of cases) {
+    const input = recommendationFixture(patch);
+    assert.equal(classifyContactRecommendation(input).bucket, expected, JSON.stringify(patch));
+  }
+});
+
+test('contact recommendation marks missing email as not contactable without changing bucket', () => {
+  const input = recommendationFixture({ clinic_rating: 5, email: '' });
+  const result = classifyContactRecommendation(input);
+  assert.equal(result.bucket, 'contact');
+  assert.equal(result.contactable, false);
+  assert.ok(result.reason_codes.includes('missing_email'));
+});
+
+test('contact recommendation sorter is deterministic and transparent', () => {
+  const rows = [
+    {
+      username: 'charlie', bucket: 'contact', clinic_status: 'watching',
+      clinic_rating: null, ai_score: 90,
+      observed_metrics: { recent_weighted_median_views: 5000, view_consistency: 80, viral_dependency: 0.1 },
+    },
+    {
+      username: 'bravo', bucket: 'contact', clinic_status: 'interested',
+      clinic_rating: null, ai_score: 50,
+      observed_metrics: { recent_weighted_median_views: 100, view_consistency: 20, viral_dependency: 0.9 },
+    },
+    {
+      username: 'alpha', bucket: 'review', clinic_status: 'watching',
+      clinic_rating: 5, ai_score: 100,
+      observed_metrics: { recent_weighted_median_views: 10000, view_consistency: 90, viral_dependency: 0.05 },
+    },
+    {
+      username: 'delta', bucket: 'need_more_data', clinic_status: 'watching',
+      clinic_rating: null, ai_score: 100, observed_metrics: {},
+    },
+  ];
+
+  rows.sort(compareContactRecommendations);
+  assert.deepEqual(rows.map(row => row.username), ['bravo', 'charlie', 'alpha', 'delta']);
+});
+
+test('contact recommendations list uses cached analysis only and survives one analyzer failure', async () => {
+  const kols = [
+    { id: 'kol-a', workspace_id: 'ws-a', platform: 'tiktok', username: 'alpha', email: 'a@example.com', ai_score: 80 },
+    { id: 'kol-b', workspace_id: 'ws-a', platform: 'tiktok', username: 'bravo', email: 'b@example.com', ai_score: 80 },
+  ];
+  const metaByKol = {
+    'kol-a': {
+      workspace_id: 'ws-a', kol_database_id: 'kol-a', platform: 'tiktok', username: 'alpha',
+      saivaree_creator_id: 'creator-a', clinic_status: 'watching', clinic_rating: 4, clinic_notes: null,
+    },
+    'kol-b': {
+      workspace_id: 'ws-a', kol_database_id: 'kol-b', platform: 'tiktok', username: 'bravo',
+      saivaree_creator_id: 'creator-b', clinic_status: 'watching', clinic_rating: null, clinic_notes: null,
+    },
+  };
+  const fakeDb = {
+    async query(sql, params) {
+      assert.match(sql, /workspace_id\s*=\s*\?/i);
+      assert.deepEqual(params, ['ws-a']);
+      return { rows: kols };
+    },
+    async queryOne(sql, params) {
+      if (/FROM saivaree_kol_meta/i.test(sql)) return metaByKol[params[1]] || null;
+      return null;
+    },
+    async exec() {},
+  };
+  let analyzeCalls = 0;
+  const analyzer = {
+    async getAnalysis(id) {
+      if (id === 'creator-b') {
+        const error = new Error('down');
+        error.code = 'analyzer_unavailable';
+        throw error;
+      }
+      return {
+        analysis_status: 'available',
+        observed_metrics: { sample_size: 20, recent_weighted_median_views: 1000, view_consistency: 70, viral_dependency: 0.2 },
+        evidence_quality: { readiness: 'decision_grade', decision_ready: true },
+      };
+    },
+    async resolveCreator() { throw new Error('mapping already exists'); },
+    async analyze() { analyzeCalls += 1; },
+  };
+  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer, randomUUID: () => 'uuid-1' });
+  const res = makeRes();
+
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' } }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.summary.contact, 1);
+  assert.equal(res.body.summary.need_more_data, 1);
+  assert.equal(res.body.creators.find(row => row.kol_id === 'kol-b').bucket, 'need_more_data');
+  assert.ok(res.body.creators.find(row => row.kol_id === 'kol-b').reason_codes.includes('analyzer_unavailable'));
+  assert.equal(analyzeCalls, 0);
+});
+
+test('prepare outreach refuses creator that is not contact ready', async () => {
+  const kol = { id: 'kol-1', workspace_id: 'ws-a', platform: 'tiktok', username: 'creator', email: 'c@example.com', ai_score: 99 };
+  const meta = {
+    workspace_id: 'ws-a', kol_database_id: 'kol-1', platform: 'tiktok', username: 'creator',
+    saivaree_creator_id: 'creator-1', clinic_status: 'watching', clinic_rating: null,
+  };
+  const fakeDb = {
+    async queryOne(sql, params) {
+      if (/FROM kol_database/i.test(sql)) return kol;
+      if (/FROM campaigns/i.test(sql)) return { id: 'camp-1', workspace_id: 'ws-a', name: 'Campaign' };
+      if (/FROM saivaree_kol_meta/i.test(sql)) return meta;
+      return null;
+    },
+    async exec() { throw new Error('must not write'); },
+  };
+  const analyzer = {
+    async getAnalysis() {
+      return {
+        analysis_status: 'available',
+        observed_metrics: { sample_size: 15 },
+        evidence_quality: { readiness: 'directional', decision_ready: false },
+      };
+    },
+    async resolveCreator() { throw new Error('not needed'); },
+    async analyze() { throw new Error('must not analyze'); },
+  };
+  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer });
+  const res = makeRes();
+
+  await handlers.prepareOutreach({
+    workspace: { id: 'ws-a' },
+    params: { kolId: 'kol-1' },
+    body: { campaign_id: 'camp-1' },
+  }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, 'not_contact_ready');
+});
+
+test('prepare outreach refuses contact-ready creator without email', async () => {
+  const kol = { id: 'kol-1', workspace_id: 'ws-a', platform: 'tiktok', username: 'creator', email: '', ai_score: 80 };
+  const meta = {
+    workspace_id: 'ws-a', kol_database_id: 'kol-1', platform: 'tiktok', username: 'creator',
+    saivaree_creator_id: 'creator-1', clinic_status: 'interested', clinic_rating: null,
+  };
+  const fakeDb = {
+    async queryOne(sql) {
+      if (/FROM kol_database/i.test(sql)) return kol;
+      if (/FROM campaigns/i.test(sql)) return { id: 'camp-1', workspace_id: 'ws-a', name: 'Campaign' };
+      if (/FROM saivaree_kol_meta/i.test(sql)) return meta;
+      return null;
+    },
+    async exec() { throw new Error('must not write'); },
+  };
+  const analyzer = {
+    async getAnalysis() {
+      return {
+        analysis_status: 'available',
+        observed_metrics: { sample_size: 20 },
+        evidence_quality: { readiness: 'decision_grade', decision_ready: true },
+      };
+    },
+    async resolveCreator() { throw new Error('not needed'); },
+    async analyze() { throw new Error('must not analyze'); },
+  };
+  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer });
+  const res = makeRes();
+
+  await handlers.prepareOutreach({
+    workspace: { id: 'ws-a' },
+    params: { kolId: 'kol-1' },
+    body: { campaign_id: 'camp-1' },
+  }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, 'missing_email');
+});
+
+test('prepare outreach creates one workspace-scoped draft and reuses it', async () => {
+  const workspaceId = 'outreach-ws';
+  const campaignId = 'outreach-camp';
+  const databaseKolId = 'outreach-db-kol';
+  await exec(
+    `INSERT INTO campaigns (id, workspace_id, name, status) VALUES (?, ?, ?, ?)`,
+    [campaignId, workspaceId, 'Clinic Campaign', 'active']
+  );
+  await exec(
+    `INSERT INTO kol_database
+     (id, workspace_id, platform, username, display_name, profile_url, email, ai_score, scrape_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [databaseKolId, workspaceId, 'tiktok', 'ready.creator', 'Ready Creator',
+      'https://www.tiktok.com/@ready.creator', 'ready@example.com', 80, 'complete']
+  );
+  await exec(
+    `INSERT INTO saivaree_kol_meta
+     (workspace_id, kol_database_id, platform, username, saivaree_creator_id, clinic_status, clinic_rating)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [workspaceId, databaseKolId, 'tiktok', 'ready.creator', 'creator-ready', 'interested', 5]
+  );
+
+  const analyzer = {
+    async getAnalysis() {
+      return {
+        analysis_status: 'available',
+        observed_metrics: { sample_size: 20, recent_weighted_median_views: 5000, view_consistency: 80, viral_dependency: 0.1 },
+        evidence_quality: { readiness: 'decision_grade', decision_ready: true },
+      };
+    },
+    async resolveCreator() { throw new Error('not needed'); },
+    async analyze() { throw new Error('must not analyze'); },
+  };
+  const handlers = createSaivareeHandlers({
+    db: { query, queryOne, exec },
+    analyzer,
+    randomUUID: (() => {
+      const ids = ['campaign-kol-1', 'contact-1'];
+      return () => ids.shift();
+    })(),
+  });
+  const req = {
+    workspace: { id: workspaceId },
+    params: { kolId: databaseKolId },
+    body: { campaign_id: campaignId },
+  };
+
+  const first = makeRes();
+  await handlers.prepareOutreach(req, first);
+  assert.equal(first.statusCode, 201);
+  assert.equal(first.body.created, true);
+  assert.equal(first.body.status, 'draft');
+
+  const second = makeRes();
+  await handlers.prepareOutreach(req, second);
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.body.created, false);
+  assert.equal(second.body.contact_id, first.body.contact_id);
+
+  const contact = await queryOne(
+    'SELECT * FROM contacts WHERE id = ? AND workspace_id = ? AND campaign_id = ?',
+    [first.body.contact_id, workspaceId, campaignId]
+  );
+  assert.equal(contact.status, 'draft');
+  const count = await queryOne(
+    'SELECT COUNT(*) AS n FROM contacts WHERE workspace_id = ? AND campaign_id = ?',
+    [workspaceId, campaignId]
+  );
+  assert.equal(Number(count.n), 1);
+});
+
+test('prepare outreach rejects campaign from another workspace', async () => {
+  const kol = { id: 'kol-1', workspace_id: 'ws-a', platform: 'tiktok', username: 'creator', email: 'c@example.com', ai_score: 80 };
+  const fakeDb = {
+    async queryOne(sql) {
+      if (/FROM kol_database/i.test(sql)) return kol;
+      if (/FROM campaigns/i.test(sql)) return null;
+      return null;
+    },
+    async exec() { throw new Error('must not write'); },
+  };
+  const handlers = createSaivareeHandlers({
+    db: fakeDb,
+    analyzer: { async analyze() { throw new Error('must not analyze'); } },
+  });
+  const res = makeRes();
+  await handlers.prepareOutreach({
+    workspace: { id: 'ws-a' },
+    params: { kolId: 'kol-1' },
+    body: { campaign_id: 'foreign-campaign' },
+  }, res);
+  assert.equal(res.statusCode, 404);
+});
 
 test('creator migration normalizes TikTok identity and dry-run performs no writes', async () => {
   const workspaceId = 'migration-ws-dry';
@@ -538,9 +857,17 @@ test('route registration does not crash when Analyzer env is not configured', ()
       db: { queryOne: async () => null, exec: async () => {} },
       rbac: fakeRbac,
     }));
-    assert.equal(registrations.length, 8);
+    assert.equal(registrations.length, 10);
     assert.equal(registrations[0][2].permission, 'kol.read');
     assert.equal(registrations[1][2].permission, 'kol.update');
+    assert.equal(
+      registrations.find(([, path]) => path === '/api/saivaree/contact-recommendations')[2].permission,
+      'kol.read'
+    );
+    assert.equal(
+      registrations.find(([, path]) => path === '/api/saivaree/kols/:kolId/prepare-outreach')[2].permission,
+      'contact.create'
+    );
   } finally {
     if (previousUrl === undefined) delete process.env.SAIVAREE_ANALYZER_BASE_URL;
     else process.env.SAIVAREE_ANALYZER_BASE_URL = previousUrl;

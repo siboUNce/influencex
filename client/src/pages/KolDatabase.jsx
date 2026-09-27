@@ -9,6 +9,7 @@ import FormField from '../components/FormField';
 import ErrorCard from '../components/ErrorCard';
 import AnalysisPanel from '../features/saivaree-intelligence/AnalysisPanel';
 import CreatorCompare from '../features/saivaree-intelligence/CreatorCompare';
+import ContactRecommendations from '../features/saivaree-intelligence/ContactRecommendations';
 
 export default function KolDatabase() {
   const { t } = useI18n();
@@ -25,6 +26,7 @@ export default function KolDatabase() {
   const [selectedKol, setSelectedKol] = useState(null);
   const [compareIds, setCompareIds] = useState([]);
   const [showCompare, setShowCompare] = useState(false);
+  const [showContactRecommendations, setShowContactRecommendations] = useState(false);
   const [apiStatus, setApiStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const pollRef = useRef(null);
@@ -148,6 +150,13 @@ export default function KolDatabase() {
               {importing ? `⏳ ${t('kol_db.importing')}` : `📥 ${t('kol_db.import_from', { name: selectedCampaign.name })}`}
             </button>
           )}
+          <button
+            className="btn btn-secondary"
+            onClick={() => setShowContactRecommendations(true)}
+            disabled={kols.length === 0}
+          >
+            {t('kol_db.contact_rec_button')}
+          </button>
           <button
             className="btn btn-secondary"
             onClick={() => setShowCompare(true)}
@@ -364,6 +373,18 @@ export default function KolDatabase() {
           onUpdated={(updated) => {
             setSelectedKol(updated);
             setKols(current => current.map(item => item.id === updated.id ? updated : item));
+          }}
+        />
+      )}
+      {showContactRecommendations && (
+        <ContactRecommendations
+          selectedCampaignId={selectedCampaignId}
+          selectedCampaign={selectedCampaign}
+          onClose={() => setShowContactRecommendations(false)}
+          onOpen={(kolId) => {
+            const kol = kols.find(item => item.id === kolId);
+            if (kol) setSelectedKol(kol);
+            setShowContactRecommendations(false);
           }}
         />
       )}

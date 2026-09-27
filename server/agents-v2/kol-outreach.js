@@ -146,3 +146,5 @@ module.exports = {
     };
   },
 };
+
+module.exports.renderPersonalizedEmail = renderPersonalizedEmail;
