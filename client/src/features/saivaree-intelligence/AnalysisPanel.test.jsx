@@ -123,7 +123,8 @@ describe('AnalysisPanel', () => {
       evidence_quality: {
         confidence_score: 27,
         sample_window_days: 90,
-        confidence_grade: 'high',
+        confidence_grade: 'low',
+        readiness: 'insufficient',
       },
       clinic_meta: {},
     });
@@ -135,9 +136,91 @@ describe('AnalysisPanel', () => {
     expect(screen.getByText('27%')).toBeInTheDocument();
     expect(screen.getByText('0.0045')).toBeInTheDocument();
     expect(screen.getByText(/sample window: 90 days/i)).toBeInTheDocument();
-    expect(screen.getByText(/confidence: high/i)).toBeInTheDocument();
+    expect(screen.getByText(/confidence: low/i)).toBeInTheDocument();
     expect(screen.queryByText('3088%')).not.toBeInTheDocument();
     expect(screen.queryByText('2700%')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      'decision_grade',
+      'Decision grade',
+      'Enough recent evidence to support a creator-selection decision.',
+    ],
+    [
+      'directional',
+      'Directional only',
+      'Useful for screening, but collect more evidence before a creator-selection decision.',
+    ],
+    [
+      'insufficient',
+      'Insufficient evidence',
+      'Do not use this analysis alone for a creator-selection decision.',
+    ],
+    [
+      null,
+      'Readiness unavailable',
+      'Re-analyze to apply the current sampling standard.',
+    ],
+    [
+      undefined,
+      'Readiness unavailable',
+      'Re-analyze to apply the current sampling standard.',
+    ],
+  ])('renders the %s readiness callout', async (readiness, heading, guidance) => {
+    api.getSaivareeAnalysis.mockResolvedValue({
+      analysis_status: 'available',
+      observed_metrics: { sample_size: 30 },
+      evidence_quality: readiness === undefined
+        ? { sample_size: 30 }
+        : { readiness, sample_size: 30 },
+      clinic_meta: {},
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText(heading)).toBeInTheDocument();
+    expect(screen.getByText(guidance)).toBeInTheDocument();
+  });
+
+  it.each([
+    [0, 30, '30'],
+    [9, 30, '30'],
+    [10, 30, '30'],
+    [19, 30, '30'],
+    [20, 30, '30'],
+    [30, 9, '9'],
+    [undefined, 19, '19'],
+  ])(
+    'shows sample progress for evidence sample size %s and metrics sample size %s',
+    async (evidenceSampleSize, metricsSampleSize, expectedSampleSize) => {
+      api.getSaivareeAnalysis.mockResolvedValue({
+        analysis_status: 'available',
+        observed_metrics: { sample_size: metricsSampleSize },
+        evidence_quality: evidenceSampleSize === undefined
+          ? {}
+          : { sample_size: evidenceSampleSize },
+        clinic_meta: {},
+      });
+
+      renderPanel();
+
+      expect(await screen.findByText(`Sample ${expectedSampleSize}/20 target`)).toBeInTheDocument();
+    }
+  );
+
+  it('omits sample progress when neither evidence nor metrics includes a sample size', async () => {
+    api.getSaivareeAnalysis.mockResolvedValue({
+      analysis_status: 'available',
+      observed_metrics: {},
+      evidence_quality: {},
+      clinic_meta: {},
+    });
+
+    renderPanel();
+
+    await screen.findByText(/creator intelligence/i);
+    expect(screen.queryByText(/sample .*\/20 target/i)).not.toBeInTheDocument();
   });
 
   it('does not call Analyzer when the creator platform is unknown', async () => {

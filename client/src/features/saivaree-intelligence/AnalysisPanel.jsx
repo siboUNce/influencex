@@ -2,6 +2,30 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { useI18n } from '../../i18n';
 
+const READINESS = {
+  decision_grade: {
+    labelKey: 'kol_db.analysis_readiness_decision_grade',
+    descriptionKey: 'kol_db.analysis_readiness_decision_grade_body',
+    color: 'var(--success)',
+  },
+  directional: {
+    labelKey: 'kol_db.analysis_readiness_directional',
+    descriptionKey: 'kol_db.analysis_readiness_directional_body',
+    color: 'var(--warning)',
+  },
+  insufficient: {
+    labelKey: 'kol_db.analysis_readiness_insufficient',
+    descriptionKey: 'kol_db.analysis_readiness_insufficient_body',
+    color: 'var(--danger)',
+  },
+};
+
+const READINESS_UNAVAILABLE = {
+  labelKey: 'kol_db.analysis_readiness_unavailable',
+  descriptionKey: 'kol_db.analysis_readiness_unavailable_body',
+  color: 'var(--text-primary)',
+};
+
 function formatCompact(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   const n = Number(value);
@@ -91,6 +115,8 @@ export default function AnalysisPanel({ kol }) {
   const metrics = analysis?.observed_metrics || {};
   const evidence = analysis?.evidence_quality || {};
   const hasAnalysis = status === 'available';
+  const readiness = READINESS[evidence.readiness] ?? READINESS_UNAVAILABLE;
+  const sampleSize = metrics.sample_size ?? evidence.sample_size;
 
   return (
     <section
@@ -143,6 +169,16 @@ export default function AnalysisPanel({ kol }) {
           <button type="button" className="btn btn-sm btn-secondary" onClick={load} style={{ marginLeft: 8 }}>
             {t('kol_db.analysis_refresh')}
           </button>
+        </div>
+      )}
+
+      {!loading && !error && hasAnalysis && (
+        <div role="note" aria-label={t('kol_db.analysis_readiness_label')} style={{ marginTop: 12, padding: '10px 12px', borderRadius: 'var(--radius-sm)', background: 'var(--bg-secondary)', fontSize: 13, lineHeight: 1.5 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '4px 12px', flexWrap: 'wrap' }}>
+            <strong style={{ color: readiness.color }}>{t(readiness.labelKey)}</strong>
+            {sampleSize != null && <span>{t('kol_db.analysis_sample_target', { count: sampleSize })}</span>}
+          </div>
+          <div>{t(readiness.descriptionKey)}</div>
         </div>
       )}
 
