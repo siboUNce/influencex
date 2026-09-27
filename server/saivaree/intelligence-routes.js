@@ -13,8 +13,9 @@ const CLINIC_STATUSES = new Set([
 ]);
 
 const CONTACT_BUCKET_ORDER = new Map([
-  ['contact', 0],
-  ['review', 1],
+  ['eligible_for_promising_pool', 0],
+  ['promising', 0],
+  ['watch', 1],
   ['need_more_data', 2],
   ['already_contacted', 3],
   ['skip', 4],
@@ -78,113 +79,83 @@ function evaluateCampaignFit({ campaign = {}, kol = {} }) {
   };
 }
 
-function classifyContactRecommendation({ kol = {}, meta = {}, analysis = {}, campaignFit = {} }) {
-  const clinicStatus = meta?.clinic_status || 'watching';
-  const clinicRating = numericOrNull(meta?.clinic_rating);
+function classifyContactRecommendation({ kol = {}, meta = {}, analysis = {} }) {
+  const status = meta?.clinic_status;
+  const rating = numericOrNull(meta?.clinic_rating);
   const evidence = analysis?.evidence_quality || {};
-  const readiness = evidence.readiness || null;
-  const analysisStatus = analysis?.analysis_status || 'missing';
-  const platform = String(kol?.platform || '').toLowerCase();
-  const reasons = [];
-
   let bucket;
-
-  if (clinicStatus === 'contacted' || clinicStatus === 'worked_with') {
+  let reason;
+  if (status === 'contacted' || status === 'worked_with') {
     bucket = 'already_contacted';
-    reasons.push(clinicStatus === 'worked_with' ? 'clinic_worked_with' : 'clinic_already_contacted');
-  } else if (clinicStatus === 'not_selected' || (clinicRating !== null && clinicRating <= 2)) {
+    reason = status === 'worked_with' ? 'clinic_worked_with' : 'clinic_already_contacted';
+  } else if (status === 'not_selected' || (rating !== null && rating <= 2)) {
     bucket = 'skip';
-    if (clinicStatus === 'not_selected') reasons.push('clinic_not_selected');
-    if (clinicRating !== null && clinicRating <= 2) reasons.push('clinic_rating_low');
-  } else if (platform !== 'tiktok') {
-    bucket = 'need_more_data';
-    reasons.push('unsupported_platform');
-  } else if (analysisStatus === 'analyzer_unavailable') {
-    bucket = 'need_more_data';
-    reasons.push('analyzer_unavailable');
-  } else if (analysisStatus !== 'available') {
-    bucket = 'need_more_data';
-    reasons.push('analysis_missing');
-  } else if (!readiness) {
-    bucket = 'need_more_data';
-    reasons.push('readiness_missing');
-  } else if (readiness === 'insufficient') {
-    bucket = 'need_more_data';
-    reasons.push('insufficient_evidence');
-  } else if (readiness === 'directional' || evidence.decision_ready !== true) {
-    bucket = 'review';
-    reasons.push(readiness === 'directional' ? 'directional_evidence' : 'not_decision_ready');
-  } else if (readiness === 'decision_grade' && evidence.decision_ready === true) {
+    reason = status === 'not_selected' ? 'clinic_not_selected' : 'clinic_rating_low';
+  } else if (String(kol.platform || '').toLowerCase() !== 'tiktok') {
+    bucket = 'need_more_data'; reason = 'unsupported_platform';
+  } else if (analysis?.analysis_status === 'analyzer_unavailable') {
+    bucket = 'need_more_data'; reason = 'analyzer_unavailable';
+  } else if (analysis?.analysis_status !== 'available') {
+    bucket = 'need_more_data'; reason = 'analysis_missing';
+  } else if (!evidence.readiness) {
+    bucket = 'need_more_data'; reason = 'readiness_missing';
+  } else if (evidence.readiness === 'insufficient') {
+    bucket = 'need_more_data'; reason = 'insufficient_evidence';
+  } else if (evidence.readiness === 'directional' || evidence.decision_ready !== true) {
+    bucket = 'watch'; reason = evidence.readiness === 'directional' ? 'directional_evidence' : 'not_decision_ready';
+  } else if (evidence.readiness === 'decision_grade') {
+    bucket = 'eligible_for_promising_pool'; reason = 'decision_grade';
+  } else {
+    bucket = 'watch'; reason = 'unrecognized_readiness';
+  }
+  return { bucket, reason_codes: [reason] };
+}
+
+// Outreach remains a separate, campaign-specific decision; a global rank never authorizes a draft.
+function classifyOutreachRecommendation({ kol = {}, meta = {}, analysis = {}, campaignFit = {} }) {
+  const global = classifyContactRecommendation({ kol, meta, analysis });
+  let bucket = global.bucket === 'watch' ? 'review' : global.bucket;
+  let reasons = global.reason_codes;
+  if (bucket === 'eligible_for_promising_pool') {
     const level = Object.prototype.hasOwnProperty.call(FIT_ORDER, campaignFit.level) ? campaignFit.level : 'unknown';
     bucket = level === 'strong' ? 'contact' : level === 'none' ? 'skip' : 'review';
-    reasons.push(`campaign_fit_${level}`);
-  } else {
-    bucket = 'review';
-    reasons.push('unrecognized_readiness');
+    reasons = [`campaign_fit_${level}`];
   }
-
-  const hasEmail = typeof kol?.email === 'string' && kol.email.trim().length > 0;
-  const contactable = bucket === 'contact' && hasEmail;
-  if (bucket === 'contact' && !hasEmail) reasons.push('missing_email');
-
-  return {
-    bucket,
-    contactable,
-    reason_codes: reasons,
-  };
+  const contactable = bucket === 'contact' && typeof kol.email === 'string' && kol.email.trim().length > 0;
+  if (bucket === 'contact' && !contactable) reasons = [...reasons, 'missing_email'];
+  return { bucket, contactable, reason_codes: reasons };
 }
 
 function compareContactRecommendations(a, b) {
-  const bucketDiff =
-    (CONTACT_BUCKET_ORDER.get(a.bucket) ?? 99) -
-    (CONTACT_BUCKET_ORDER.get(b.bucket) ?? 99);
-  if (bucketDiff !== 0) return bucketDiff;
-
-  if (a.bucket === 'contact' || a.bucket === 'review') {
-    const fitDiff = (FIT_ORDER[a.campaign_fit?.level] ?? 2) - (FIT_ORDER[b.campaign_fit?.level] ?? 2);
-    if (fitDiff) return fitDiff;
-    if (a.bucket === 'review') {
+  const bucketDiff = (CONTACT_BUCKET_ORDER.get(a.bucket) ?? 99) - (CONTACT_BUCKET_ORDER.get(b.bucket) ?? 99);
+  if (bucketDiff) return bucketDiff;
+  if (['eligible_for_promising_pool', 'promising', 'watch'].includes(a.bucket)) {
+    if (a.bucket === 'watch') {
       const readinessOrder = { decision_grade: 0, directional: 1 };
-      const readinessDiff = (readinessOrder[a.evidence_quality?.readiness] ?? 2) - (readinessOrder[b.evidence_quality?.readiness] ?? 2);
-      if (readinessDiff) return readinessDiff;
+      const diff = (readinessOrder[a.evidence_quality?.readiness] ?? 2) - (readinessOrder[b.evidence_quality?.readiness] ?? 2);
+      if (diff) return diff;
     }
-
-    const aMetrics = a.observed_metrics || {};
-    const bMetrics = b.observed_metrics || {};
-    const recentDiff = compareDescNullable(
-      aMetrics.recent_weighted_median_views,
-      bMetrics.recent_weighted_median_views
-    );
-    if (recentDiff !== 0) return recentDiff;
-
-    const consistencyDiff = compareDescNullable(
-      aMetrics.view_consistency,
-      bMetrics.view_consistency
-    );
-    if (consistencyDiff !== 0) return consistencyDiff;
-
-    const aViral = numericOrNull(aMetrics.viral_dependency);
-    const bViral = numericOrNull(bMetrics.viral_dependency);
-    if (aViral !== bViral) {
-      if (aViral === null) return 1;
-      if (bViral === null) return -1;
-      return aViral - bViral;
+    const am = a.observed_metrics || {};
+    const bm = b.observed_metrics || {};
+    for (const [key, ascending] of [
+      ['views_per_follower', false], ['view_consistency', false],
+      ['viral_dependency', true], ['recent_weighted_median_views', false], ['sample_size', false],
+    ]) {
+      const av = numericOrNull(key === 'sample_size' ? am[key] ?? a.evidence_quality?.sample_size : am[key]);
+      const bv = numericOrNull(key === 'sample_size' ? bm[key] ?? b.evidence_quality?.sample_size : bm[key]);
+      if (av === bv) continue;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return ascending ? av - bv : bv - av;
     }
-    const viewsDiff = compareDescNullable(aMetrics.views_per_follower, bMetrics.views_per_follower);
-    if (viewsDiff) return viewsDiff;
-    const sampleDiff = compareDescNullable(aMetrics.sample_size ?? a.evidence_quality?.sample_size, bMetrics.sample_size ?? b.evidence_quality?.sample_size);
-    if (sampleDiff) return sampleDiff;
-    if (a.bucket === 'review') {
-      const interestedDiff = Number(b.clinic_status === 'interested') - Number(a.clinic_status === 'interested');
-      if (interestedDiff) return interestedDiff;
-      const ratingDiff = compareDescNullable(a.clinic_rating, b.clinic_rating);
-      if (ratingDiff) return ratingDiff;
+    if (a.bucket === 'watch') {
+      const interested = Number(b.clinic_status === 'interested') - Number(a.clinic_status === 'interested');
+      if (interested) return interested;
+      const rating = compareDescNullable(a.clinic_rating, b.clinic_rating);
+      if (rating) return rating;
     }
   }
-
-  return String(a.username || '').localeCompare(String(b.username || ''), 'en', {
-    sensitivity: 'base',
-  });
+  return String(a.username || '').localeCompare(String(b.username || ''), 'en', { sensitivity: 'base' });
 }
 
 async function getSaivareeMeta(db, workspaceId, kolId) {
@@ -330,7 +301,7 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     return meta;
   }
 
-  async function buildRecommendationForKol(workspaceId, kol, campaign) {
+  async function buildRecommendationForKol(workspaceId, kol) {
     let meta = await getSaivareeMeta(db, workspaceId, kol.id);
     if (!meta) {
       meta = {
@@ -360,8 +331,7 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
       }
     }
 
-    const campaignFit = evaluateCampaignFit({ campaign, kol });
-    const classification = classifyContactRecommendation({ kol, meta, analysis, campaignFit });
+    const classification = classifyContactRecommendation({ kol, meta, analysis });
 
     return {
       kol_id: kol.id,
@@ -370,7 +340,6 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
       platform: kol.platform,
       email: kol.email || '',
       followers: numericOrNull(kol.followers) ?? 0,
-      campaign_fit: campaignFit,
       clinic_status: meta?.clinic_status || 'watching',
       clinic_rating: numericOrNull(meta?.clinic_rating),
       ...classification,
@@ -484,12 +453,6 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
   async function getContactRecommendations(req, res) {
     try {
       const workspaceId = req.workspace.id;
-      const campaignId = req.query?.campaign_id;
-      if (typeof campaignId !== 'string' || !campaignId.trim()) {
-        return res.status(400).json({ error: 'campaign_id is required', code: 'campaign_required' });
-      }
-      const campaign = await db.queryOne('SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?', [campaignId, workspaceId]);
-      if (!campaign) return res.status(404).json({ error: 'Campaign not found in this workspace' });
       const result = await db.query(
         `SELECT *
          FROM kol_database
@@ -500,13 +463,24 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
 
       const creators = [];
       for (const kol of result.rows || []) {
-        creators.push(await buildRecommendationForKol(workspaceId, kol, campaign));
+        creators.push(await buildRecommendationForKol(workspaceId, kol));
+      }
+      creators.sort(compareContactRecommendations);
+      let rank = 0;
+      for (const row of creators) {
+        if (row.bucket !== 'eligible_for_promising_pool') continue;
+        rank += 1;
+        row.bucket = rank <= 10 ? 'promising' : 'watch';
+        row.reason_codes = rank <= 10
+          ? ['promising_ranked_by_creator_intelligence', 'decision_grade']
+          : ['outside_promising_shortlist', 'decision_grade'];
+        if (rank <= 10) row.rank = rank;
       }
       creators.sort(compareContactRecommendations);
 
       const summary = {
-        contact: 0,
-        review: 0,
+        promising: 0,
+        watch: 0,
         need_more_data: 0,
         already_contacted: 0,
         skip: 0,
@@ -545,7 +519,10 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
         return res.status(404).json({ error: 'Campaign not found in this workspace' });
       }
 
-      const recommendation = await buildRecommendationForKol(workspaceId, kol, campaign);
+      const row = await buildRecommendationForKol(workspaceId, kol);
+      const recommendation = classifyOutreachRecommendation({
+        kol, meta: row, analysis: row, campaignFit: evaluateCampaignFit({ campaign, kol }),
+      });
       if (recommendation.bucket !== 'contact') {
         return res.status(409).json({
           error: 'Creator is not ready for outreach',
@@ -808,6 +785,7 @@ module.exports = {
   loadWorkspaceKol,
   evaluateCampaignFit,
   classifyContactRecommendation,
+  classifyOutreachRecommendation,
   compareContactRecommendations,
   createSaivareeHandlers,
   registerSaivareeIntelligenceRoutes,

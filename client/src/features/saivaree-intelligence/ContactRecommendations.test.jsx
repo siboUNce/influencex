@@ -3,11 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-const toastMocks = vi.hoisted(() => ({
-  success: vi.fn(),
-  error: vi.fn(),
-}));
-
 vi.mock('../../api/client', () => ({
   api: {
     getSaivareeContactRecommendations: vi.fn(),
@@ -15,10 +10,6 @@ vi.mock('../../api/client', () => ({
     analyzeSaivareeKol: vi.fn(),
   },
   setApiTranslator: vi.fn(),
-}));
-
-vi.mock('../../components/Toast', () => ({
-  useToast: () => toastMocks,
 }));
 
 import { api } from '../../api/client';
@@ -36,10 +27,9 @@ function row(overrides = {}) {
     ai_score: 70,
     clinic_status: 'watching',
     clinic_rating: 4,
-    bucket: 'contact',
+    bucket: 'promising',
     contactable: true,
-    reason_codes: ['campaign_fit_strong'],
-    campaign_fit: { level: 'strong', matched_terms: ['skincare'], reason_codes: ['category_match'] },
+    reason_codes: ['promising_ranked_by_creator_intelligence'],
     analysis_status: 'available',
     observed_metrics: {
       sample_size: 20,
@@ -58,8 +48,8 @@ function row(overrides = {}) {
 
 function result(creators) {
   const summary = {
-    contact: 0,
-    review: 0,
+    promising: 0,
+    watch: 0,
     need_more_data: 0,
     already_contacted: 0,
     skip: 0,
@@ -72,8 +62,6 @@ function renderPanel(props = {}) {
   return render(
     <I18nProvider>
       <ContactRecommendations
-        selectedCampaignId={props.selectedCampaignId === undefined ? 'camp-1' : props.selectedCampaignId}
-        selectedCampaign={props.selectedCampaign || { id: 'camp-1', name: 'Clinic Campaign' }}
         onOpen={props.onOpen || vi.fn()}
         onClose={props.onClose || vi.fn()}
       />
@@ -85,89 +73,53 @@ beforeEach(() => {
   api.getSaivareeContactRecommendations.mockReset();
   api.prepareSaivareeOutreach.mockReset();
   api.analyzeSaivareeKol.mockReset();
-  toastMocks.success.mockReset();
-  toastMocks.error.mockReset();
 });
 
 describe('ContactRecommendations', () => {
-  it('renders bucket counts from cached recommendations without starting Analyze', async () => {
+  it('loads a global cached shortlist once without a campaign and shows ranks and raw metrics', async () => {
     api.getSaivareeContactRecommendations.mockResolvedValue(result([
-      row(),
-      row({ kol_id: 'kol-2', username: 'review.one', bucket: 'review', contactable: false }),
-      row({ kol_id: 'kol-3', username: 'data.one', bucket: 'need_more_data', contactable: false }),
+      row(), row({ kol_id: 'kol-2', username: 'watch.one', bucket: 'watch' }),
+      row({ kol_id: 'kol-3', username: 'data.one', bucket: 'need_more_data' }),
     ]));
-
     renderPanel();
-
-    expect((await screen.findAllByText('Creator One')).length).toBe(3);
-    expect(screen.getAllByText('Contact now').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Review').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Need more data').length).toBeGreaterThan(0);
+    await screen.findByText('@creator.one');
+    expect(screen.getByRole('heading', { name: 'Promising stars' })).toBeInTheDocument();
+    for (const label of ['Promising', 'Watch', 'Need more data']) expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    expect(screen.getByText('#1')).toBeInTheDocument();
+    expect(screen.getAllByText('0.5000')).toHaveLength(3);
+    expect(screen.queryByText('Campaign fit')).not.toBeInTheDocument();
+    expect(screen.queryByText(/AI (score|70)/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Select a campaign/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Prepare outreach/i })).not.toBeInTheDocument();
     expect(api.getSaivareeContactRecommendations).toHaveBeenCalledTimes(1);
-    expect(api.getSaivareeContactRecommendations).toHaveBeenCalledWith('camp-1');
+    expect(api.getSaivareeContactRecommendations).toHaveBeenCalledWith();
+    expect(api.prepareSaivareeOutreach).not.toHaveBeenCalled();
     expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
   });
 
-  it('does not load recommendations until a campaign is selected', async () => {
-    api.getSaivareeContactRecommendations.mockResolvedValue(result([row()]));
-
-    renderPanel({ selectedCampaignId: null });
-
-    expect(screen.getByText('Select a campaign first.')).toBeInTheDocument();
-    expect(api.getSaivareeContactRecommendations).not.toHaveBeenCalled();
-    expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
-  });
-
-  it('disables draft preparation when the creator has no email', async () => {
-    api.getSaivareeContactRecommendations.mockResolvedValue(result([
-      row({ email: '', contactable: false, reason_codes: ['missing_email'] }),
-    ]));
-
-    renderPanel({
-      selectedCampaignId: 'camp-1',
-      selectedCampaign: { id: 'camp-1', name: 'Clinic Campaign' },
-    });
-
-    expect(await screen.findByRole('button', { name: 'No email' })).toBeDisabled();
-  });
-
-  it('prepares one draft and reports success without sending or analyzing', async () => {
-    const user = userEvent.setup();
-    api.getSaivareeContactRecommendations.mockResolvedValue(result([row()]));
-    api.prepareSaivareeOutreach.mockResolvedValue({
-      contact_id: 'contact-1',
-      created: true,
-      status: 'draft',
-    });
-
-    renderPanel({
-      selectedCampaignId: 'camp-1',
-      selectedCampaign: { id: 'camp-1', name: 'Clinic Campaign' },
-    });
-
-    await user.click(await screen.findByRole('button', { name: 'Prepare outreach draft' }));
-
-    expect(api.prepareSaivareeOutreach).toHaveBeenCalledTimes(1);
-    expect(api.prepareSaivareeOutreach).toHaveBeenCalledWith('kol-1', 'camp-1');
-    expect(toastMocks.success).toHaveBeenCalledWith('Draft ready in Contacts');
-    expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Draft ready' })).toBeDisabled();
-  });
-
-  it.each(['review', 'need_more_data'])('opens a %s creator without auto-analyzing', async (bucket) => {
+  it.each(['promising', 'watch', 'need_more_data', 'already_contacted', 'skip'])('opens a %s creator even without email, without drafting or analyzing', async bucket => {
     const user = userEvent.setup();
     const onOpen = vi.fn();
     const onClose = vi.fn();
-    api.getSaivareeContactRecommendations.mockResolvedValue(result([
-      row({ kol_id: 'kol-review', username: 'review.one', bucket, contactable: false }),
-    ]));
-
+    api.getSaivareeContactRecommendations.mockResolvedValue(result([row({ bucket, email: '' })]));
     renderPanel({ onOpen, onClose });
-
     await user.click(await screen.findByRole('button', { name: 'Open' }));
-
-    expect(onOpen).toHaveBeenCalledWith('kol-review');
+    expect(onOpen).toHaveBeenCalledWith('kol-1');
     expect(onClose).toHaveBeenCalledTimes(1);
+    expect(api.prepareSaivareeOutreach).not.toHaveBeenCalled();
+    expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
+  });
+
+  it('shows an empty shortlist when no cached candidates exist', async () => {
+    api.getSaivareeContactRecommendations.mockResolvedValue(result([]));
+    renderPanel();
+    expect(await screen.findByText('No creators to review yet.')).toBeInTheDocument();
+  });
+
+  it('shows a load failure without starting paid work', async () => {
+    api.getSaivareeContactRecommendations.mockRejectedValue(new Error('unavailable'));
+    renderPanel();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to load contact recommendations');
     expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
   });
 });

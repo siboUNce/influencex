@@ -153,8 +153,7 @@ export default function KolDatabase() {
           <button
             className="btn btn-secondary"
             onClick={() => setShowContactRecommendations(true)}
-            disabled={!selectedCampaignId}
-            title={!selectedCampaignId ? t('kol_db.contact_rec_select_campaign') : undefined}
+            disabled={kols.length === 0}
           >
             {t('kol_db.contact_rec_button')}
           </button>
@@ -379,8 +378,6 @@ export default function KolDatabase() {
       )}
       {showContactRecommendations && (
         <ContactRecommendations
-          selectedCampaignId={selectedCampaignId}
-          selectedCampaign={selectedCampaign}
           onClose={() => setShowContactRecommendations(false)}
           onOpen={(kolId) => {
             const kol = kols.find(item => item.id === kolId);

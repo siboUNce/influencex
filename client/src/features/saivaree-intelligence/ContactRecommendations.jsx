@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { useI18n } from '../../i18n';
-import { useToast } from '../../components/Toast';
 import Modal from '../../components/Modal';
 
-const BUCKETS = ['contact', 'review', 'need_more_data', 'already_contacted', 'skip'];
+const BUCKETS = ['promising', 'watch', 'need_more_data', 'already_contacted', 'skip'];
 
 function compact(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -25,27 +24,20 @@ function ratioPercent(value) {
 }
 
 export default function ContactRecommendations({
-  selectedCampaignId,
-  selectedCampaign,
   onOpen,
   onClose,
 }) {
   const { t } = useI18n();
-  const toast = useToast();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
-  const [preparingId, setPreparingId] = useState(null);
-  const [preparedIds, setPreparedIds] = useState(() => new Set());
 
   useEffect(() => {
     let active = true;
     setData(null);
-    setPreparedIds(new Set());
     setError(false);
-    if (!selectedCampaignId) { setLoading(false); return; }
     setLoading(true);
-    api.getSaivareeContactRecommendations(selectedCampaignId)
+    api.getSaivareeContactRecommendations()
       .then((result) => {
         if (active) {
           setData(result);
@@ -59,21 +51,7 @@ export default function ContactRecommendations({
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [selectedCampaignId]);
-
-  async function prepareDraft(row) {
-    if (!selectedCampaignId || !row.contactable || preparingId) return;
-    setPreparingId(row.kol_id);
-    try {
-      await api.prepareSaivareeOutreach(row.kol_id, selectedCampaignId);
-      setPreparedIds((current) => new Set(current).add(row.kol_id));
-      toast.success(t('kol_db.contact_rec_draft_ready'));
-    } catch (err) {
-      toast.error(err?.message || t('kol_db.contact_rec_prepare_error'));
-    } finally {
-      setPreparingId(null);
-    }
-  }
+  }, []);
 
   function openCreator(row) {
     onOpen?.(row.kol_id);
@@ -82,14 +60,14 @@ export default function ContactRecommendations({
 
   const summary = data?.summary || {};
   const creators = data?.creators || [];
-  const contactRanks = new Map(creators.filter(row => row.bucket === 'contact').map((row, index) => [row.kol_id, index + 1]));
+  const promisingRanks = new Map(creators.filter(row => row.bucket === 'promising').map((row, index) => [row.kol_id, index + 1]));
 
   return (
     <Modal onClose={onClose} labelledBy="contact-recommendations-title" style={{ maxWidth: '1180px' }}>
       <div className="modal-header">
         <div>
           <h3 id="contact-recommendations-title" style={{ marginBottom: 3 }}>
-            {t('kol_db.contact_rec_title')}{selectedCampaignId ? ` — ${selectedCampaign?.name || selectedCampaignId}` : ''}
+            {t('kol_db.contact_rec_title')}
           </h3>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {t('kol_db.contact_rec_subtitle')}
@@ -101,22 +79,12 @@ export default function ContactRecommendations({
       </div>
 
       <div className="modal-body">
-        {selectedCampaignId ? (
-          <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-            {t('kol_db.contact_rec_campaign', { name: selectedCampaign?.name || selectedCampaignId })}
-          </div>
-        ) : (
-          <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--warning)' }}>
-            {t('kol_db.contact_rec_select_campaign')}
-          </div>
-        )}
-
-        {selectedCampaignId && loading && <div>{t('kol_db.contact_rec_loading')}</div>}
-        {selectedCampaignId && !loading && error && (
+        {loading && <div>{t('kol_db.contact_rec_loading')}</div>}
+        {!loading && error && (
           <div role="alert" style={{ color: 'var(--danger)' }}>{t('kol_db.contact_rec_error')}</div>
         )}
 
-        {selectedCampaignId && !loading && !error && (
+        {!loading && !error && (
           <>
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 8, marginBottom: 14 }}>
               {BUCKETS.map((bucket) => (
@@ -139,7 +107,6 @@ export default function ContactRecommendations({
                       <th>{t('kol_db.col_kol')}</th>
                       <th>{t('kol_db.contact_rec_col_status')}</th>
                       <th>{t('kol_db.contact_rec_col_evidence')}</th>
-                      <th>{t('kol_db.contact_rec_col_fit')}</th>
                       <th>{t('kol_db.analysis_recent_median')}</th>
                       <th>{t('kol_db.analysis_consistency')}</th>
                       <th>{t('kol_db.analysis_viral_dependency')}</th>
@@ -153,19 +120,16 @@ export default function ContactRecommendations({
                       const metrics = row.observed_metrics || {};
                       const evidence = row.evidence_quality || {};
                       const sampleSize = metrics.sample_size ?? evidence.sample_size;
-                      const prepared = preparedIds.has(row.kol_id);
-                      const missingEmail = row.bucket === 'contact' && !row.contactable;
-                      const noCampaign = row.bucket === 'contact' && !selectedCampaignId;
                       return (
                         <tr key={row.kol_id}>
                           <td>
-                            <div style={{ fontWeight: 600 }}>{contactRanks.has(row.kol_id) && <span>#{contactRanks.get(row.kol_id)} </span>}{row.display_name || row.username}</div>
+                            <div style={{ fontWeight: 600 }}>{promisingRanks.has(row.kol_id) && <span>#{promisingRanks.get(row.kol_id)} </span>}{row.display_name || row.username}</div>
                             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>@{row.username}</div>
                           </td>
                           <td>
                             <span className={
-                              row.bucket === 'contact' ? 'badge badge-green'
-                                : row.bucket === 'review' ? 'badge badge-orange'
+                              row.bucket === 'promising' ? 'badge badge-green'
+                                : row.bucket === 'watch' ? 'badge badge-orange'
                                   : row.bucket === 'skip' ? 'badge badge-red'
                                     : 'badge'
                             }>
@@ -183,41 +147,15 @@ export default function ContactRecommendations({
                               {evidence.readiness ? t(`kol_db.contact_rec_readiness_${evidence.readiness}`) : '-'}
                             </div>
                           </td>
-                          <td>
-                            <div>{t(`kol_db.contact_rec_fit_${row.campaign_fit?.level || 'unknown'}`)}</div>
-                            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{row.campaign_fit?.matched_terms?.slice(0, 3).join(', ')}</div>
-                            {row.campaign_fit?.reason_codes?.includes('source_campaign_match') && <div style={{ fontSize: 12 }}>{t('kol_db.contact_rec_source_match')}</div>}
-                          </td>
                           <td>{compact(metrics.recent_weighted_median_views)}</td>
                           <td>{scorePercent(metrics.view_consistency)}</td>
                           <td>{ratioPercent(metrics.viral_dependency)}</td>
                           <td>{metrics.views_per_follower == null ? '-' : Number(metrics.views_per_follower).toFixed(4)}</td>
                           <td>{row.email || t('kol_db.contact_rec_no_email')}</td>
                           <td>
-                            {row.bucket === 'contact' ? (
-                              <button
-                                type="button"
-                                className="btn btn-sm btn-primary"
-                                onClick={() => prepareDraft(row)}
-                                disabled={preparingId === row.kol_id || prepared || missingEmail || noCampaign}
-                              >
-                                {prepared
-                                  ? t('kol_db.contact_rec_draft_ready_short')
-                                  : missingEmail
-                                    ? t('kol_db.contact_rec_no_email')
-                                    : noCampaign
-                                      ? t('kol_db.contact_rec_select_campaign_short')
-                                      : preparingId === row.kol_id
-                                        ? t('kol_db.contact_rec_preparing')
-                                        : t('kol_db.contact_rec_prepare')}
-                              </button>
-                            ) : (row.bucket === 'review' || row.bucket === 'need_more_data') ? (
-                              <button type="button" className="btn btn-sm btn-secondary" onClick={() => openCreator(row)}>
-                                {t('kol_db.contact_rec_open')}
-                              </button>
-                            ) : (
-                              <span style={{ color: 'var(--text-muted)' }}>-</span>
-                            )}
+                            <button type="button" className="btn btn-sm btn-secondary" onClick={() => openCreator(row)}>
+                              {t('kol_db.contact_rec_open')}
+                            </button>
                           </td>
                         </tr>
                       );

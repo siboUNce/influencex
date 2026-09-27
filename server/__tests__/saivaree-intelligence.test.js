@@ -21,6 +21,7 @@ const {
   upsertSaivareeMeta,
   evaluateCampaignFit,
   classifyContactRecommendation,
+  classifyOutreachRecommendation,
   compareContactRecommendations,
   createSaivareeHandlers,
   registerSaivareeIntelligenceRoutes,
@@ -450,44 +451,68 @@ test('same creator can be contact for one campaign and skip for another', () => 
   const meta = { clinic_status: 'watching', clinic_rating: 5 };
   const fitA = evaluateCampaignFit({ campaign: { id: 'camp-a', filter_criteria: { categories: 'skincare' } }, kol });
   const fitB = evaluateCampaignFit({ campaign: { id: 'camp-b', filter_criteria: { categories: 'food' } }, kol });
-  assert.equal(classifyContactRecommendation({ kol, meta, analysis, campaignFit: fitA }).bucket, 'contact');
-  assert.equal(classifyContactRecommendation({ kol, meta, analysis, campaignFit: fitB }).bucket, 'skip');
+  assert.equal(classifyOutreachRecommendation({ kol, meta, analysis, campaignFit: fitA }).bucket, 'contact');
+  assert.equal(classifyOutreachRecommendation({ kol, meta, analysis, campaignFit: fitB }).bucket, 'skip');
 });
 
-test('ai_score cannot change contact classification or ordering', () => {
-  const low = recommendationFixture({ ai_score: 0, username: 'zulu', recent: 5000 });
-  const high = recommendationFixture({ ai_score: 99, username: 'alpha', recent: 1000 });
-  assert.equal(classifyContactRecommendation(low).bucket, 'contact');
-  assert.equal(classifyContactRecommendation(high).bucket, 'contact');
-  const baseRows = [
-    { username: 'zulu', bucket: 'contact', ai_score: 0, campaign_fit: { level: 'strong' }, observed_metrics: { recent_weighted_median_views: 5000 } },
-    { username: 'alpha', bucket: 'contact', ai_score: 99, campaign_fit: { level: 'strong' }, observed_metrics: { recent_weighted_median_views: 1000 } },
-  ];
-  const first = baseRows.map(row => ({ ...row })).sort(compareContactRecommendations).map(row => row.username);
-  const swapped = baseRows.map(row => ({ ...row, ai_score: row.ai_score === 0 ? 99 : 0 })).sort(compareContactRecommendations).map(row => row.username);
-  assert.deepEqual(first, ['zulu', 'alpha']);
-  assert.deepEqual(swapped, first);
-});
-
-test('contact sorter uses objective Creator Intelligence signals in the declared order', () => {
-  const strong = { bucket: 'contact', campaign_fit: { level: 'strong' }, clinic_status: 'watching' };
+test('AI score and human interest cannot change global eligibility or objective ordering', () => {
+  for (const readiness of ['decision_grade', 'directional', 'insufficient']) {
+    const low = recommendationFixture({ readiness, ai_score: 0 });
+    const high = recommendationFixture({ readiness, ai_score: 99, clinic_status: 'interested', clinic_rating: 5 });
+    assert.deepEqual(classifyContactRecommendation(low), classifyContactRecommendation(high));
+    assert.notEqual(classifyContactRecommendation(high).bucket, 'promising');
+  }
   const rows = [
-    { ...strong, username: 'recent-low', observed_metrics: { recent_weighted_median_views: 100 } },
-    { ...strong, username: 'recent-high', observed_metrics: { recent_weighted_median_views: 200 } },
-    { ...strong, username: 'consistency-low', observed_metrics: { recent_weighted_median_views: 50, view_consistency: 40 } },
-    { ...strong, username: 'consistency-high', observed_metrics: { recent_weighted_median_views: 50, view_consistency: 80 } },
-    { ...strong, username: 'viral-high', observed_metrics: { recent_weighted_median_views: 40, view_consistency: 70, viral_dependency: 0.8 } },
-    { ...strong, username: 'viral-low', observed_metrics: { recent_weighted_median_views: 40, view_consistency: 70, viral_dependency: 0.1 } },
-    { ...strong, username: 'vpf-low', observed_metrics: { recent_weighted_median_views: 30, view_consistency: 60, viral_dependency: 0.2, views_per_follower: 0.2 } },
-    { ...strong, username: 'vpf-high', observed_metrics: { recent_weighted_median_views: 30, view_consistency: 60, viral_dependency: 0.2, views_per_follower: 0.8 } },
-    { ...strong, username: 'sample-low', observed_metrics: { recent_weighted_median_views: 20, view_consistency: 50, viral_dependency: 0.2, views_per_follower: 0.5, sample_size: 20 } },
-    { ...strong, username: 'sample-high', observed_metrics: { recent_weighted_median_views: 20, view_consistency: 50, viral_dependency: 0.2, views_per_follower: 0.5, sample_size: 30 } },
+    { username: 'zulu', bucket: 'promising', ai_score: 0, observed_metrics: { views_per_follower: 2 } },
+    { username: 'alpha', bucket: 'promising', ai_score: 99, observed_metrics: { views_per_follower: 1 } },
   ];
-  rows.sort(compareContactRecommendations);
-  assert.deepEqual(rows.map(row => row.username), [
-    'recent-high', 'recent-low', 'consistency-high', 'consistency-low',
-    'viral-low', 'viral-high', 'vpf-high', 'vpf-low', 'sample-high', 'sample-low',
-  ]);
+  assert.deepEqual([...rows].sort(compareContactRecommendations).map(r => r.username), ['zulu', 'alpha']);
+  assert.deepEqual(rows.map(r => ({ ...r, ai_score: 99 - r.ai_score })).sort(compareContactRecommendations).map(r => r.username), ['zulu', 'alpha']);
+});
+
+test('global eligibility preserves readiness and negative human overrides', () => {
+  const cases = [
+    [{}, 'eligible_for_promising_pool'],
+    [{ readiness: 'directional', clinic_status: 'interested', clinic_rating: 5 }, 'watch'],
+    [{ decision_ready: false }, 'watch'],
+    [{ readiness: 'insufficient' }, 'need_more_data'],
+    [{ readiness: null }, 'need_more_data'],
+    [{ analysis_status: 'missing' }, 'need_more_data'],
+    [{ analysis_status: 'analyzer_unavailable' }, 'need_more_data'],
+    [{ clinic_rating: 1 }, 'skip'], [{ clinic_rating: 2 }, 'skip'],
+    [{ clinic_status: 'not_selected' }, 'skip'],
+    [{ clinic_status: 'contacted' }, 'already_contacted'],
+    [{ clinic_status: 'worked_with' }, 'already_contacted'],
+  ];
+  for (const [patch, bucket] of cases) assert.equal(classifyContactRecommendation(recommendationFixture(patch)).bucket, bucket);
+  const unsupported = recommendationFixture();
+  unsupported.kol.platform = 'instagram';
+  assert.equal(classifyContactRecommendation(unsupported).bucket, 'need_more_data');
+});
+
+test('promising order is views per follower, consistency, viral dependence, recent median, sample, username', () => {
+  const base = { views_per_follower: 1, view_consistency: 50, viral_dependency: 0.3, recent_weighted_median_views: 100, sample_size: 20 };
+  const rows = [
+    ['z-vpf', { views_per_follower: 2, view_consistency: 0 }],
+    ['y-consistency', { view_consistency: 60, viral_dependency: 1 }],
+    ['x-viral', { viral_dependency: 0.1, recent_weighted_median_views: 0 }],
+    ['w-recent', { recent_weighted_median_views: 200 }],
+    ['v-sample', { sample_size: 30 }],
+    ['alpha', {}], ['bravo', {}],
+  ].map(([username, metrics]) => ({ username, bucket: 'promising', observed_metrics: { ...base, ...metrics } }));
+  assert.deepEqual(rows.reverse().sort(compareContactRecommendations).map(r => r.username),
+    ['z-vpf', 'y-consistency', 'x-viral', 'w-recent', 'v-sample', 'alpha', 'bravo']);
+  const unknown = { username: 'aaa', bucket: 'promising', observed_metrics: {} };
+  assert.equal([...rows, unknown].sort(compareContactRecommendations).at(-1), unknown);
+});
+
+test('watch ranks decision grade first and human history only after objective ties', () => {
+  const row = (username, readiness, views, clinic_status = 'watching', clinic_rating = null) => ({
+    username, bucket: 'watch', evidence_quality: { readiness }, observed_metrics: { views_per_follower: views }, clinic_status, clinic_rating,
+  });
+  const rows = [row('directional', 'directional', 100), row('objective', 'decision_grade', 2),
+    row('interested', 'decision_grade', 1, 'interested'), row('rated', 'decision_grade', 1, 'watching', 5), row('unrated', 'decision_grade', 1)];
+  assert.deepEqual(rows.sort(compareContactRecommendations).map(r => r.username), ['objective', 'interested', 'rated', 'unrated', 'directional']);
 });
 
 test('contact recommendation policy gates outreach on readiness and campaign fit', () => {
@@ -509,43 +534,16 @@ test('contact recommendation policy gates outreach on readiness and campaign fit
 
   for (const [patch, expected] of cases) {
     const input = recommendationFixture(patch);
-    assert.equal(classifyContactRecommendation(input).bucket, expected, JSON.stringify(patch));
+    assert.equal(classifyOutreachRecommendation(input).bucket, expected, JSON.stringify(patch));
   }
 });
 
 test('contact recommendation marks missing email as not contactable without changing bucket', () => {
   const input = recommendationFixture({ clinic_rating: 5, email: '' });
-  const result = classifyContactRecommendation(input);
+  const result = classifyOutreachRecommendation(input);
   assert.equal(result.bucket, 'contact');
   assert.equal(result.contactable, false);
   assert.ok(result.reason_codes.includes('missing_email'));
-});
-
-test('contact recommendation sorter is deterministic and transparent', () => {
-  const rows = [
-    {
-      username: 'charlie', bucket: 'contact', clinic_status: 'watching',
-      clinic_rating: null, ai_score: 90,
-      observed_metrics: { recent_weighted_median_views: 5000, view_consistency: 80, viral_dependency: 0.1 },
-    },
-    {
-      username: 'bravo', bucket: 'contact', clinic_status: 'interested',
-      clinic_rating: null, ai_score: 50,
-      observed_metrics: { recent_weighted_median_views: 100, view_consistency: 20, viral_dependency: 0.9 },
-    },
-    {
-      username: 'alpha', bucket: 'review', clinic_status: 'watching',
-      clinic_rating: 5, ai_score: 100,
-      observed_metrics: { recent_weighted_median_views: 10000, view_consistency: 90, viral_dependency: 0.05 },
-    },
-    {
-      username: 'delta', bucket: 'need_more_data', clinic_status: 'watching',
-      clinic_rating: null, ai_score: 100, observed_metrics: {},
-    },
-  ];
-
-  rows.sort(compareContactRecommendations);
-  assert.deepEqual(rows.map(row => row.username), ['charlie', 'bravo', 'alpha', 'delta']);
 });
 
 test('contact recommendations list uses cached analysis only and survives one analyzer failure', async () => {
@@ -570,11 +568,7 @@ test('contact recommendations list uses cached analysis only and survives one an
       return { rows: kols };
     },
     async queryOne(sql, params) {
-      if (/FROM campaigns/i.test(sql)) {
-        assert.match(sql, /workspace_id\s*=\s*\?/i);
-        assert.deepEqual(params, ['camp-1', 'ws-a']);
-        return { id: 'camp-1', filter_criteria: { categories: 'skincare' } };
-      }
+      assert.doesNotMatch(sql, /FROM campaigns/i);
       if (/FROM saivaree_kol_meta/i.test(sql)) return metaByKol[params[1]] || null;
       return null;
     },
@@ -600,38 +594,58 @@ test('contact recommendations list uses cached analysis only and survives one an
   const handlers = createSaivareeHandlers({ db: fakeDb, analyzer, randomUUID: () => 'uuid-1' });
   const res = makeRes();
 
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' }, query: { campaign_id: 'camp-1' } }, res);
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' } }, res);
 
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body.summary.contact, 1);
+  assert.equal(res.body.summary.promising, 1);
   assert.equal(res.body.summary.need_more_data, 1);
   assert.equal(res.body.creators.find(row => row.kol_id === 'kol-b').bucket, 'need_more_data');
   assert.ok(res.body.creators.find(row => row.kol_id === 'kol-b').reason_codes.includes('analyzer_unavailable'));
   assert.equal(analyzeCalls, 0);
 });
 
-test('contact recommendations require a workspace-scoped campaign before reading Analyzer', async () => {
-  let analyzerCalls = 0;
-  const fakeDb = {
-    async query() { throw new Error('KOL list must not load without a valid campaign'); },
-    async queryOne() { return null; },
-    async exec() {},
-  };
-  const analyzer = {
-    async getAnalysis() { analyzerCalls += 1; },
-    async analyze() { analyzerCalls += 1; },
-  };
-  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer });
-
-  const missingRes = makeRes();
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' }, query: {} }, missingRes);
-  assert.equal(missingRes.statusCode, 400);
-  assert.equal(missingRes.body.code, 'campaign_required');
-
-  const foreignRes = makeRes();
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' }, query: { campaign_id: 'foreign' } }, foreignRes);
-  assert.equal(foreignRes.statusCode, 404);
-  assert.equal(analyzerCalls, 0);
+test('global endpoint has no campaign lookup and limits the shortlist to ten eligible workspace creators', async () => {
+  const kols = Array.from({ length: 11 }, (_, i) => ({ id: `kol-${i}`, username: `creator-${i}`, platform: 'tiktok', ai_score: i % 2 ? 99 : 0 }));
+  let cachedCalls = 0;
+  let paidCalls = 0;
+  const handlers = createSaivareeHandlers({
+    db: {
+      async query(sql, params) { assert.match(sql, /WHERE workspace_id = \?/); assert.deepEqual(params, ['ws-global']); return { rows: kols }; },
+      async queryOne(sql, params) {
+        assert.match(sql, /FROM saivaree_kol_meta/);
+        assert.deepEqual(params.slice(0, 1), ['ws-global']);
+        return { saivaree_creator_id: params[1], clinic_status: params[1] === 'kol-0' ? 'interested' : 'watching', clinic_rating: params[1] === 'kol-0' ? 5 : null };
+      },
+      async exec() { assert.fail('must not write'); },
+    },
+    analyzer: {
+      async getAnalysis(id) { cachedCalls++; return { analysis_status: 'available', observed_metrics: { views_per_follower: Number(id.split('-')[1]), sample_size: 20 }, evidence_quality: { readiness: 'decision_grade', decision_ready: true } }; },
+      async analyze() { paidCalls++; },
+    },
+  });
+  const res = makeRes();
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-global' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.summary, { promising: 10, watch: 1, need_more_data: 0, already_contacted: 0, skip: 0 });
+  assert.deepEqual(res.body.creators.slice(0, 10).map(r => r.rank), [1,2,3,4,5,6,7,8,9,10]);
+  assert.equal(res.body.creators[0].kol_id, 'kol-10');
+  assert.equal(res.body.creators[10].kol_id, 'kol-0');
+  assert.equal(res.body.creators[10].bucket, 'watch');
+  for (const row of res.body.creators) {
+    assert.equal('ai_score' in row, false);
+    assert.equal('campaign_fit' in row, false);
+  }
+  assert.equal(cachedCalls, 11);
+  assert.equal(paidCalls, 0);
+  kols.length = 3;
+  const fewer = makeRes();
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-global' } }, fewer);
+  assert.equal(fewer.body.summary.promising, 3);
+  kols.length = 0;
+  const empty = makeRes();
+  await handlers.getContactRecommendations({ workspace: { id: 'ws-global' } }, empty);
+  assert.equal(empty.body.summary.promising, 0);
+  assert.deepEqual(empty.body.creators, []);
 });
 
 test('prepare outreach recomputes campaign fit and refuses a creator that only fits another campaign', async () => {
