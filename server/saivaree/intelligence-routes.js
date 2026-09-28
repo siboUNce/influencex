@@ -453,18 +453,42 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
   async function getContactRecommendations(req, res) {
     try {
       const workspaceId = req.workspace.id;
+      const scan = await analyzer.getPromisingStars();
       const result = await db.query(
-        `SELECT *
-         FROM kol_database
-         WHERE workspace_id = ?
-         ORDER BY username ASC`,
+        `SELECT k.id, k.platform, k.username, k.email, m.clinic_status, m.clinic_rating
+         FROM kol_database k
+         LEFT JOIN saivaree_kol_meta m ON m.kol_database_id = k.id AND m.workspace_id = k.workspace_id
+         WHERE k.workspace_id = ? ORDER BY k.id`,
         [workspaceId]
       );
-
-      const creators = [];
-      for (const kol of result.rows || []) {
-        creators.push(await buildRecommendationForKol(workspaceId, kol));
+      const identity = (row) => `${String(row.platform || '').trim().toLowerCase()}:${String(row.username || '').trim().replace(/^@/, '').toLowerCase()}`;
+      const localByIdentity = new Map();
+      for (const local of result.rows || []) {
+        if (!localByIdentity.has(identity(local))) localByIdentity.set(identity(local), local);
       }
+      const creators = (scan.candidates || []).map(candidate => {
+        const local = localByIdentity.get(identity(candidate));
+        const meta = { clinic_status: local?.clinic_status || 'watching', clinic_rating: numericOrNull(local?.clinic_rating) };
+        return {
+          kol_id: local?.id || null,
+          creator_id: candidate.creator_id,
+          platform: candidate.platform,
+          username: candidate.username,
+          display_name: candidate.display_name || candidate.username,
+          profile_url: candidate.profile_url || '',
+          avatar_url: candidate.avatar_url || '',
+          followers: candidate.followers,
+          email: local?.email || '',
+          ...meta,
+          ...classifyContactRecommendation({ kol: candidate, meta, analysis: candidate }),
+          analysis_status: candidate.analysis_status,
+          analyzed_at: candidate.analyzed_at,
+          observed_metrics: candidate.observed_metrics || {},
+          evidence_quality: candidate.evidence_quality || {},
+          eligibility: candidate.eligibility,
+          discovery_provenance: candidate.discovery_provenance,
+        };
+      });
       creators.sort(compareContactRecommendations);
       let rank = 0;
       for (const row of creators) {
@@ -491,9 +515,32 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
         }
       }
 
-      return res.json({ summary, creators });
+      return res.json({ summary, creators, scan: {
+        latest_run: scan.latest_run || null,
+        active_run: scan.active_run || null,
+        latest_completed_run: scan.latest_completed_run || null,
+        funnel: scan.funnel || scan.latest_funnel || {},
+      } });
     } catch (_error) {
+      if (_error?.code === 'analyzer_unavailable') return res.status(503).json({ error: 'Analyzer unavailable', code: 'analyzer_unavailable' });
       return res.status(500).json({ error: 'Unable to load contact recommendations' });
+    }
+  }
+
+  async function refreshContactRecommendations(req, res) {
+    if (Object.keys(req.body || {}).length) {
+      return res.status(400).json({ error: 'Refresh accepts no settings', code: 'invalid_refresh_body' });
+    }
+    try {
+      const requestId = `${req.workspace.id}:promising-stars:${randomUUID()}`;
+      const result = await analyzer.refreshPromisingStars({ requestId });
+      return res.status(202).json({ ...result, request_id: requestId });
+    } catch (error) {
+      if (error?.code === 'analyzer_unavailable') return res.status(503).json({ error: 'Analyzer unavailable', code: 'analyzer_unavailable' });
+      if ([409, 422, 429].includes(error?.status)) {
+        return res.status(error.status).json({ error: 'Candidate refresh could not be queued', code: 'refresh_rejected' });
+      }
+      return res.status(500).json({ error: 'Unable to refresh candidates', code: 'refresh_failed' });
     }
   }
 
@@ -669,6 +716,7 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     getAnalysis,
     analyze,
     getContactRecommendations,
+    refreshContactRecommendations,
     prepareOutreach,
     compare,
   };
@@ -713,6 +761,11 @@ function registerSaivareeIntelligenceRoutes(app, {
     `${basePath}/api/saivaree/kols/:kolId/prepare-outreach`,
     rbac.requirePermission('contact.create'),
     handlers.prepareOutreach
+  );
+  app.post(
+    `${basePath}/api/saivaree/contact-recommendations/refresh`,
+    rbac.requirePermission('kol.update'),
+    handlers.refreshContactRecommendations
   );
   app.post(
     `${basePath}/api/saivaree/compare`,
@@ -773,6 +826,8 @@ function createConfiguredAnalyzer() {
     resolveCreator: unavailable,
     getAnalysis: unavailable,
     analyze: unavailable,
+    getPromisingStars: unavailable,
+    refreshPromisingStars: unavailable,
     getSettings: unavailable,
     updateSettings: unavailable,
     testSettings: unavailable,

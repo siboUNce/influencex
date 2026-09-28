@@ -153,7 +153,6 @@ export default function KolDatabase() {
           <button
             className="btn btn-secondary"
             onClick={() => setShowContactRecommendations(true)}
-            disabled={kols.length === 0}
           >
             {t('kol_db.contact_rec_button')}
           </button>

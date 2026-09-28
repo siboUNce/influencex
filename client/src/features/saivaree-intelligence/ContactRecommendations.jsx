@@ -1,7 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { useI18n } from '../../i18n';
 import Modal from '../../components/Modal';
+
+const rowId = row => row.kol_id || row.creator_id || `${row.platform}:${row.username}`;
+const isActive = run => ['queued', 'running'].includes(run?.status);
+const safeProfile = value => {
+  try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) ? url.href : null; } catch { return null; }
+};
 
 const BUCKETS = ['promising', 'watch', 'need_more_data', 'already_contacted', 'skip'];
 
@@ -32,35 +38,92 @@ export default function ContactRecommendations({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
+  const [refreshing, setRefreshing] = useState(false);
+  const [waitingForScan, setWaitingForScan] = useState(false);
+  const [pollEpoch, setPollEpoch] = useState(0);
+  const [pollStopped, setPollStopped] = useState(false);
+  const mounted = useRef(false);
+  const posting = useRef(false);
+  const pendingScan = useRef(null);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
   useEffect(() => {
     let active = true;
-    setData(null);
-    setError(false);
-    setLoading(true);
-    api.getSaivareeContactRecommendations()
-      .then((result) => {
-        if (active) {
-          setData(result);
-          setError(false);
+    let timer;
+    let polls = 0;
+    setPollStopped(false);
+    function pollAgain() {
+      if (++polls < 100) timer = setTimeout(load, 3000);
+      else {
+        pendingScan.current = null;
+        setWaitingForScan(false);
+        setPollStopped(true);
+      }
+    }
+    async function load() {
+      try {
+        const result = await api.getSaivareeContactRecommendations();
+        if (!active) return;
+        setData(result);
+        setError(false);
+        const pending = pendingScan.current;
+        if (pending) {
+          const runs = [result.scan?.active_run, result.scan?.latest_run, result.scan?.latest_completed_run];
+          const observed = runs.find(run => run?.id && (pending.id
+            ? run.id === pending.id : !pending.previousIds.includes(run.id)));
+          if (observed && ['completed', 'failed', 'cancelled'].includes(observed.status)) {
+            pendingScan.current = null;
+          }
         }
-      })
-      .catch(() => {
-        if (active) setError(true);
-      })
-      .finally(() => {
+        setWaitingForScan(Boolean(pendingScan.current));
+        if (pendingScan.current || isActive(result.scan?.active_run)) pollAgain();
+      } catch {
+        if (active) {
+          setError(true);
+          if (pendingScan.current) pollAgain();
+        }
+      } finally {
         if (active) setLoading(false);
-      });
-    return () => { active = false; };
-  }, []);
+      }
+    }
+    load();
+    return () => { active = false; clearTimeout(timer); };
+  }, [pollEpoch]);
+
+  async function refresh() {
+    if (posting.current || pendingScan.current || loading || waitingForScan || isActive(data?.scan?.active_run)) return;
+    posting.current = true;
+    setRefreshing(true);
+    try {
+      const run = await api.refreshSaivareeContactRecommendations();
+      if (!mounted.current) return;
+      pendingScan.current = {
+        id: run?.id,
+        previousIds: [data?.scan?.active_run?.id, data?.scan?.latest_run?.id, data?.scan?.latest_completed_run?.id].filter(Boolean),
+      };
+      setWaitingForScan(true);
+      setPollEpoch(epoch => epoch + 1);
+    } catch {
+      if (mounted.current) setError(true);
+    } finally {
+      posting.current = false;
+      if (mounted.current) setRefreshing(false);
+    }
+  }
 
   function openCreator(row) {
-    onOpen?.(row.kol_id);
-    onClose?.();
+    if (row.kol_id) {
+      onOpen?.(row.kol_id);
+      onClose?.();
+    } else {
+      const profile = safeProfile(row.profile_url);
+      if (profile) window.open(profile, '_blank', 'noopener,noreferrer');
+    }
   }
 
   const summary = data?.summary || {};
   const creators = data?.creators || [];
-  const promisingRanks = new Map(creators.filter(row => row.bucket === 'promising').map((row, index) => [row.kol_id, index + 1]));
+  const promisingRanks = new Map(creators.filter(row => row.bucket === 'promising').map((row, index) => [rowId(row), index + 1]));
 
   return (
     <Modal onClose={onClose} labelledBy="contact-recommendations-title" style={{ maxWidth: '1180px' }}>
@@ -79,12 +142,30 @@ export default function ContactRecommendations({
       </div>
 
       <div className="modal-body">
+        <button type="button" className="btn btn-primary" onClick={refresh}
+          disabled={loading || refreshing || waitingForScan || isActive(data?.scan?.active_run)}>
+          {t('kol_db.contact_rec_refresh')}
+        </button>
+        <div role="status" style={{ margin: '10px 0', fontSize: 13 }}>
+          {t('kol_db.contact_rec_scan_status', { status: t(`kol_db.contact_rec_scan_${
+            refreshing || (waitingForScan && !isActive(data?.scan?.active_run)) ? 'queued' :
+              ['queued', 'running', 'completed', 'failed', 'cancelled'].includes((data?.scan?.active_run || data?.scan?.latest_run)?.status)
+                ? (data.scan.active_run || data.scan.latest_run).status : 'idle'
+          }`) })}
+          {data?.scan?.latest_completed_run?.finished_at && <div>{t('kol_db.contact_rec_completed_at', { time: new Date(data.scan.latest_completed_run.finished_at).toLocaleString() })}</div>}
+        </div>
+        {pollStopped && <div>{t('kol_db.contact_rec_poll_stopped')}</div>}
+        {data?.scan && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginBottom: 14 }}>
+          {['unique_discovered', 'eligible_candidates', 'selected_pool', 'analyzed_pool', 'decision_grade_count'].map(key => (
+            <span key={key}>{t(`kol_db.contact_rec_funnel_${key}`)}: {data.scan.funnel?.[key] ?? '-'}</span>
+          ))}
+        </div>}
         {loading && <div>{t('kol_db.contact_rec_loading')}</div>}
         {!loading && error && (
           <div role="alert" style={{ color: 'var(--danger)' }}>{t('kol_db.contact_rec_error')}</div>
         )}
 
-        {!loading && !error && (
+        {!loading && data && (
           <>
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 8, marginBottom: 14 }}>
               {BUCKETS.map((bucket) => (
@@ -121,9 +202,9 @@ export default function ContactRecommendations({
                       const evidence = row.evidence_quality || {};
                       const sampleSize = metrics.sample_size ?? evidence.sample_size;
                       return (
-                        <tr key={row.kol_id}>
+                        <tr key={rowId(row)}>
                           <td>
-                            <div style={{ fontWeight: 600 }}>{promisingRanks.has(row.kol_id) && <span>#{promisingRanks.get(row.kol_id)} </span>}{row.display_name || row.username}</div>
+                            <div style={{ fontWeight: 600 }}>{promisingRanks.has(rowId(row)) && <span>#{promisingRanks.get(rowId(row))} </span>}{row.display_name || row.username}</div>
                             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>@{row.username}</div>
                           </td>
                           <td>
@@ -153,7 +234,7 @@ export default function ContactRecommendations({
                           <td>{metrics.views_per_follower == null ? '-' : Number(metrics.views_per_follower).toFixed(4)}</td>
                           <td>{row.email || t('kol_db.contact_rec_no_email')}</td>
                           <td>
-                            <button type="button" className="btn btn-sm btn-secondary" onClick={() => openCreator(row)}>
+                            <button type="button" className="btn btn-sm btn-secondary" disabled={!row.kol_id && !safeProfile(row.profile_url)} onClick={() => openCreator(row)}>
                               {t('kol_db.contact_rec_open')}
                             </button>
                           </td>

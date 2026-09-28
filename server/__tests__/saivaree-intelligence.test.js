@@ -546,106 +546,156 @@ test('contact recommendation marks missing email as not contactable without chan
   assert.ok(result.reason_codes.includes('missing_email'));
 });
 
-test('contact recommendations list uses cached analysis only and survives one analyzer failure', async () => {
-  const kols = [
-    { id: 'kol-a', workspace_id: 'ws-a', platform: 'tiktok', username: 'alpha', email: 'a@example.com', category: 'skincare', ai_score: 0 },
-    { id: 'kol-b', workspace_id: 'ws-a', platform: 'tiktok', username: 'bravo', email: 'b@example.com', ai_score: 80 },
-  ];
-  const metaByKol = {
-    'kol-a': {
-      workspace_id: 'ws-a', kol_database_id: 'kol-a', platform: 'tiktok', username: 'alpha',
-      saivaree_creator_id: 'creator-a', clinic_status: 'watching', clinic_rating: 4, clinic_notes: null,
-    },
-    'kol-b': {
-      workspace_id: 'ws-a', kol_database_id: 'kol-b', platform: 'tiktok', username: 'bravo',
-      saivaree_creator_id: 'creator-b', clinic_status: 'watching', clinic_rating: null, clinic_notes: null,
-    },
-  };
-  const fakeDb = {
-    async query(sql, params) {
-      assert.match(sql, /workspace_id\s*=\s*\?/i);
-      assert.deepEqual(params, ['ws-a']);
-      return { rows: kols };
-    },
-    async queryOne(sql, params) {
-      assert.doesNotMatch(sql, /FROM campaigns/i);
-      if (/FROM saivaree_kol_meta/i.test(sql)) return metaByKol[params[1]] || null;
-      return null;
-    },
-    async exec() {},
-  };
-  let analyzeCalls = 0;
+function scanCandidate(index = 0, overrides = {}) {
+  return { creator_id: `creator-${index}`, platform: 'tiktok', username: `creator-${index}`,
+    display_name: `Creator ${index}`, profile_url: `https://www.tiktok.com/@creator-${index}`,
+    avatar_url: 'https://example.com/avatar.png', followers: 1000,
+    analysis_status: 'available', analyzed_at: '2026-09-28T00:00:00Z',
+    observed_metrics: { views_per_follower: index, sample_size: 20 },
+    evidence_quality: { readiness: 'decision_grade', decision_ready: true },
+    eligibility: { eligible: true }, discovery_provenance: { source: 'scan' }, ...overrides };
+}
+
+function scanHarness(candidates, locals = []) {
+  const calls = { scan: 0, sql: 0, forbidden: 0 };
+  const forbidden = async () => { calls.forbidden++; throw new Error('Forbidden GET dependency'); };
   const analyzer = {
-    async getAnalysis(id) {
-      if (id === 'creator-b') {
-        const error = new Error('down');
-        error.code = 'analyzer_unavailable';
-        throw error;
-      }
-      return {
-        analysis_status: 'available',
-        observed_metrics: { sample_size: 20, recent_weighted_median_views: 1000, view_consistency: 70, viral_dependency: 0.2 },
-        evidence_quality: { readiness: 'decision_grade', decision_ready: true },
-      };
-    },
-    async resolveCreator() { throw new Error('mapping already exists'); },
-    async analyze() { analyzeCalls += 1; },
+    getPromisingStars: async () => { calls.scan++; return { candidates,
+      active_run: { id: 'active', status: 'running' }, latest_completed_run: { id: 'done', finished_at: '2026-09-28T00:00:00Z' },
+      funnel: { unique_discovered: 300, analyzed_pool: candidates.length } }; },
+    resolveCreator: forbidden, getAnalysis: forbidden, analyze: forbidden, refreshPromisingStars: forbidden,
   };
-  const handlers = createSaivareeHandlers({ db: fakeDb, analyzer, randomUUID: () => 'uuid-1' });
+  const db = {
+    query: async (sql, params) => {
+      calls.sql++;
+      assert.match(sql, /WHERE k.workspace_id = \?/);
+      assert.match(sql, /m.workspace_id = k.workspace_id/);
+      assert.doesNotMatch(sql, /FROM campaigns/i);
+      assert.deepEqual(params, ['ws-scan']);
+      return { rows: locals };
+    },
+    queryOne: forbidden, exec: forbidden,
+  };
+  return { handlers: createSaivareeHandlers({ db, analyzer }), calls, analyzer, db };
+}
+
+test('cached scan is the only candidate source and local context is merged in one workspace query', async () => {
+  const h = scanHarness([scanCandidate(2), scanCandidate(1)], [
+    { id: 'local-2', platform: ' TikTok ', username: '@CREATOR-2', email: 'clinic@example.com', clinic_status: 'interested', clinic_rating: 5 },
+    { id: 'not-in-scan', platform: 'tiktok', username: 'manual-only', clinic_rating: 5 },
+  ]);
   const res = makeRes();
-
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-a' } }, res);
-
+  await h.handlers.getContactRecommendations({ workspace: { id: 'ws-scan' } }, res);
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body.summary.promising, 1);
-  assert.equal(res.body.summary.need_more_data, 1);
-  assert.equal(res.body.creators.find(row => row.kol_id === 'kol-b').bucket, 'need_more_data');
-  assert.ok(res.body.creators.find(row => row.kol_id === 'kol-b').reason_codes.includes('analyzer_unavailable'));
-  assert.equal(analyzeCalls, 0);
+  assert.deepEqual(h.calls, { scan: 1, sql: 1, forbidden: 0 });
+  assert.equal(res.body.creators.length, 2);
+  const [local, fresh] = res.body.creators;
+  assert.equal(local.kol_id, 'local-2');
+  assert.equal(local.email, 'clinic@example.com');
+  assert.equal(local.clinic_rating, 5);
+  assert.equal(local.clinic_status, 'interested');
+  assert.equal(fresh.kol_id, null);
+  assert.equal(fresh.email, '');
+  assert.equal(fresh.clinic_status, 'watching');
+  assert.equal(fresh.clinic_rating, null);
+  assert.equal(fresh.profile_url, 'https://www.tiktok.com/@creator-1');
+  assert.deepEqual(fresh.discovery_provenance, { source: 'scan' });
+  assert.equal(res.body.scan.funnel.unique_discovered, 300);
+  assert.equal(res.body.scan.active_run.status, 'running');
 });
 
-test('global endpoint has no campaign lookup and limits the shortlist to ten eligible workspace creators', async () => {
-  const kols = Array.from({ length: 11 }, (_, i) => ({ id: `kol-${i}`, username: `creator-${i}`, platform: 'tiktok', ai_score: i % 2 ? 99 : 0 }));
-  let cachedCalls = 0;
-  let paidCalls = 0;
-  const handlers = createSaivareeHandlers({
-    db: {
-      async query(sql, params) { assert.match(sql, /WHERE workspace_id = \?/); assert.deepEqual(params, ['ws-global']); return { rows: kols }; },
-      async queryOne(sql, params) {
-        assert.match(sql, /FROM saivaree_kol_meta/);
-        assert.deepEqual(params.slice(0, 1), ['ws-global']);
-        return { saivaree_creator_id: params[1], clinic_status: params[1] === 'kol-0' ? 'interested' : 'watching', clinic_rating: params[1] === 'kol-0' ? 5 : null };
-      },
-      async exec() { assert.fail('must not write'); },
-    },
-    analyzer: {
-      async getAnalysis(id) { cachedCalls++; return { analysis_status: 'available', observed_metrics: { views_per_follower: Number(id.split('-')[1]), sample_size: 20 }, evidence_quality: { readiness: 'decision_grade', decision_ready: true } }; },
-      async analyze() { paidCalls++; },
-    },
-  });
+test('scan shortlist keeps only top ten eligible creators and ignores AI scores', async () => {
+  const candidates = Array.from({ length: 11 }, (_, i) => scanCandidate(i, { ai_score: 99 - i }));
+  const h = scanHarness(candidates);
   const res = makeRes();
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-global' } }, res);
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.summary, { promising: 10, watch: 1, need_more_data: 0, already_contacted: 0, skip: 0 });
+  await h.handlers.getContactRecommendations({ workspace: { id: 'ws-scan' } }, res);
+  assert.equal(res.body.summary.promising, 10);
+  assert.equal(res.body.summary.watch, 1);
   assert.deepEqual(res.body.creators.slice(0, 10).map(r => r.rank), [1,2,3,4,5,6,7,8,9,10]);
-  assert.equal(res.body.creators[0].kol_id, 'kol-10');
-  assert.equal(res.body.creators[10].kol_id, 'kol-0');
-  assert.equal(res.body.creators[10].bucket, 'watch');
+  assert.equal(res.body.creators[0].creator_id, 'creator-10');
+  assert.equal(res.body.creators[10].creator_id, 'creator-0');
   for (const row of res.body.creators) {
     assert.equal('ai_score' in row, false);
     assert.equal('campaign_fit' in row, false);
   }
-  assert.equal(cachedCalls, 11);
-  assert.equal(paidCalls, 0);
-  kols.length = 3;
-  const fewer = makeRes();
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-global' } }, fewer);
-  assert.equal(fewer.body.summary.promising, 3);
-  kols.length = 0;
-  const empty = makeRes();
-  await handlers.getContactRecommendations({ workspace: { id: 'ws-global' } }, empty);
-  assert.equal(empty.body.summary.promising, 0);
-  assert.deepEqual(empty.body.creators, []);
+  assert.equal(h.calls.forbidden, 0);
+});
+
+test('local negative overrides survive scan discovery and different platforms do not match', async () => {
+  const h = scanHarness([scanCandidate(1), scanCandidate(2), scanCandidate(3)], [
+    { id: 'skip', username: 'creator-1', platform: 'tiktok', clinic_rating: 2 },
+    { id: 'contacted', username: 'creator-2', platform: 'tiktok', clinic_status: 'contacted' },
+    { id: 'wrong-platform', username: 'creator-3', platform: 'instagram', clinic_rating: 1 },
+  ]);
+  const res = makeRes();
+  await h.handlers.getContactRecommendations({ workspace: { id: 'ws-scan' } }, res);
+  assert.equal(res.body.summary.skip, 1);
+  assert.equal(res.body.summary.already_contacted, 1);
+  assert.equal(res.body.creators[0].kol_id, null);
+  assert.equal(res.body.creators[0].bucket, 'promising');
+});
+
+test('scan GET fails with stable 503 instead of silently returning local creators', async () => {
+  const h = scanHarness([]);
+  h.analyzer.getPromisingStars = async () => { throw Object.assign(new Error('secret detail'), { code: 'analyzer_unavailable' }); };
+  const res = makeRes();
+  await h.handlers.getContactRecommendations({ workspace: { id: 'ws-scan' } }, res);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.code, 'analyzer_unavailable');
+  assert.equal(h.calls.sql, 0);
+  assert.equal(h.calls.forbidden, 0);
+  assert.doesNotMatch(JSON.stringify(res.body), /secret/);
+});
+
+test('Analyzer scan client uses internal auth and exact cached GET / explicit refresh POST contracts', async () => {
+  const calls = [];
+  const client = createAnalyzerClient({ baseUrl: 'http://analyzer.test', apiKey: 'test-internal-key', fetchImpl: async (url, options) => {
+    calls.push({ url, options }); return fakeResponse(options.method === 'POST' ? 202 : 200, { status: 'queued' });
+  } });
+  await client.getPromisingStars();
+  await client.refreshPromisingStars({ requestId: 'ws:promising-stars:one' });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, 'http://analyzer.test/internal/influencex/promising-stars');
+  assert.equal(calls[0].options.method || 'GET', 'GET');
+  assert.equal(calls[1].url, 'http://analyzer.test/internal/influencex/promising-stars/refresh');
+  assert.equal(calls[1].options.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].options.body), { request_id: 'ws:promising-stars:one' });
+  for (const call of calls) assert.equal(call.options.headers['X-InfluenceX-Internal-Key'], 'test-internal-key');
+});
+
+test('explicit refresh makes one call per request with unique workspace request IDs and no DB writes', async () => {
+  const calls = [];
+  const handlers = createSaivareeHandlers({ db: {}, analyzer: {
+    refreshPromisingStars: async args => { calls.push(args); return { id: 'run-1', status: 'queued' }; },
+  } });
+  for (let i = 0; i < 2; i++) {
+    const res = makeRes();
+    await handlers.refreshContactRecommendations({ workspace: { id: 'ws-scan' }, body: {} }, res);
+    assert.equal(res.statusCode, 202);
+    assert.equal(calls.length, i + 1);
+    assert.equal(res.body.status, 'queued');
+    assert.equal(res.body.request_id, calls[i].requestId);
+    assert.match(res.body.request_id, /^ws-scan:promising-stars:/);
+  }
+  assert.notEqual(calls[0].requestId, calls[1].requestId);
+  const invalid = makeRes();
+  await handlers.refreshContactRecommendations({ workspace: { id: 'ws-scan' }, body: { max_enrichments: 999 } }, invalid);
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(calls.length, 2);
+});
+
+test('refresh maps unavailable and safe Analyzer rejection statuses without retries or secret details', async () => {
+  for (const status of [503, 409, 422, 429]) {
+    let calls = 0;
+    const handlers = createSaivareeHandlers({ db: {}, analyzer: { refreshPromisingStars: async () => {
+      calls++; throw Object.assign(new Error('secret provider payload'), status === 503 ? { code: 'analyzer_unavailable' } : { status });
+    } } });
+    const res = makeRes();
+    await handlers.refreshContactRecommendations({ workspace: { id: 'ws' }, body: {} }, res);
+    assert.equal(res.statusCode, status);
+    assert.equal(calls, 1);
+    assert.doesNotMatch(JSON.stringify(res.body), /secret/);
+  }
 });
 
 test('prepare outreach recomputes campaign fit and refuses a creator that only fits another campaign', async () => {
@@ -1035,12 +1085,16 @@ test('route registration does not crash when Analyzer env is not configured', ()
       db: { queryOne: async () => null, exec: async () => {} },
       rbac: fakeRbac,
     }));
-    assert.equal(registrations.length, 10);
+    assert.equal(registrations.length, 11);
     assert.equal(registrations[0][2].permission, 'kol.read');
     assert.equal(registrations[1][2].permission, 'kol.update');
     assert.equal(
       registrations.find(([, path]) => path === '/api/saivaree/contact-recommendations')[2].permission,
       'kol.read'
+    );
+    assert.equal(
+      registrations.find(([, path]) => path === '/api/saivaree/contact-recommendations/refresh')[2].permission,
+      'kol.update'
     );
     assert.equal(
       registrations.find(([, path]) => path === '/api/saivaree/kols/:kolId/prepare-outreach')[2].permission,

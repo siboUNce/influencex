@@ -98,6 +98,16 @@ function createAnalyzerClient({
       });
     },
 
+    async getPromisingStars() {
+      return requireOk('/internal/influencex/promising-stars');
+    },
+
+    async refreshPromisingStars({ requestId }) {
+      return requireOk('/internal/influencex/promising-stars/refresh', {
+        method: 'POST', body: JSON.stringify({ request_id: requestId }),
+      });
+    },
+
     async getSettings() {
       return requireOk('/internal/influencex/settings');
     },
