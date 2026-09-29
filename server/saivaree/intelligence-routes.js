@@ -21,6 +21,8 @@ const CONTACT_BUCKET_ORDER = new Map([
   ['skip', 4],
 ]);
 
+const CANDIDATE_TIER_ORDER = { decision_grade: 0, deep_analyzed: 1, discovery_only: 2 };
+
 function numericOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
@@ -83,6 +85,9 @@ function classifyContactRecommendation({ kol = {}, meta = {}, analysis = {} }) {
   const status = meta?.clinic_status;
   const rating = numericOrNull(meta?.clinic_rating);
   const evidence = analysis?.evidence_quality || {};
+  const eligibility = analysis?.eligibility || {};
+  const eligible = eligibility.classification
+    ? eligibility.classification === 'ELIGIBLE_INFLUENCER' : eligibility.eligible === true;
   let bucket;
   let reason;
   if (status === 'contacted' || status === 'worked_with') {
@@ -93,6 +98,14 @@ function classifyContactRecommendation({ kol = {}, meta = {}, analysis = {} }) {
     reason = status === 'not_selected' ? 'clinic_not_selected' : 'clinic_rating_low';
   } else if (String(kol.platform || '').toLowerCase() !== 'tiktok') {
     bucket = 'need_more_data'; reason = 'unsupported_platform';
+  } else if ((eligibility.classification && !eligible) || (!eligibility.classification && eligibility.eligible === false)) {
+    bucket = 'skip'; reason = 'ineligible_candidate';
+  } else if (analysis?.candidate_tier === 'decision_grade') {
+    bucket = 'promising'; reason = 'decision_grade';
+  } else if (analysis?.candidate_tier === 'deep_analyzed') {
+    bucket = 'promising'; reason = 'deep_analyzed';
+  } else if (analysis?.candidate_tier === 'discovery_only') {
+    bucket = eligible ? 'promising' : 'need_more_data'; reason = 'discovery_only';
   } else if (analysis?.analysis_status === 'analyzer_unavailable') {
     bucket = 'need_more_data'; reason = 'analyzer_unavailable';
   } else if (analysis?.analysis_status !== 'available') {
@@ -113,7 +126,8 @@ function classifyContactRecommendation({ kol = {}, meta = {}, analysis = {} }) {
 
 // Outreach remains a separate, campaign-specific decision; a global rank never authorizes a draft.
 function classifyOutreachRecommendation({ kol = {}, meta = {}, analysis = {}, campaignFit = {} }) {
-  const global = classifyContactRecommendation({ kol, meta, analysis });
+  // Browse tiers must not bypass the existing evidence requirements for outreach.
+  const global = classifyContactRecommendation({ kol, meta, analysis: { ...analysis, candidate_tier: undefined } });
   let bucket = global.bucket === 'watch' ? 'review' : global.bucket;
   let reasons = global.reason_codes;
   if (bucket === 'eligible_for_promising_pool') {
@@ -130,6 +144,18 @@ function compareContactRecommendations(a, b) {
   const bucketDiff = (CONTACT_BUCKET_ORDER.get(a.bucket) ?? 99) - (CONTACT_BUCKET_ORDER.get(b.bucket) ?? 99);
   if (bucketDiff) return bucketDiff;
   if (['eligible_for_promising_pool', 'promising', 'watch'].includes(a.bucket)) {
+    const tierDiff = (CANDIDATE_TIER_ORDER[a.candidate_tier] ?? 3) - (CANDIDATE_TIER_ORDER[b.candidate_tier] ?? 3);
+    if (tierDiff) return tierDiff;
+    if (Object.hasOwn(CANDIDATE_TIER_ORDER, a.candidate_tier)) {
+      const ar = numericOrNull(a.selection_rank);
+      const br = numericOrNull(b.selection_rank);
+      // Missing upstream ranks sort after known ranks.
+      if (ar !== br) {
+        if (ar === null) return 1;
+        if (br === null) return -1;
+        return ar - br;
+      }
+    }
     if (a.bucket === 'watch') {
       const readinessOrder = { decision_grade: 0, directional: 1 };
       const diff = (readinessOrder[a.evidence_quality?.readiness] ?? 2) - (readinessOrder[b.evidence_quality?.readiness] ?? 2);
@@ -482,6 +508,9 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
           ...meta,
           ...classifyContactRecommendation({ kol: candidate, meta, analysis: candidate }),
           analysis_status: candidate.analysis_status,
+          candidate_tier: candidate.candidate_tier,
+          selection_rank: candidate.selection_rank,
+          enrichment_status: candidate.enrichment_status,
           analyzed_at: candidate.analyzed_at,
           observed_metrics: candidate.observed_metrics || {},
           evidence_quality: candidate.evidence_quality || {},
@@ -492,13 +521,11 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
       creators.sort(compareContactRecommendations);
       let rank = 0;
       for (const row of creators) {
-        if (row.bucket !== 'eligible_for_promising_pool') continue;
-        rank += 1;
-        row.bucket = rank <= 10 ? 'promising' : 'watch';
-        row.reason_codes = rank <= 10
-          ? ['promising_ranked_by_creator_intelligence', 'decision_grade']
-          : ['outside_promising_shortlist', 'decision_grade'];
-        if (rank <= 10) row.rank = rank;
+        if (row.bucket === 'eligible_for_promising_pool') {
+          row.bucket = 'promising';
+          row.reason_codes = ['promising_ranked_by_creator_intelligence', 'decision_grade'];
+        }
+        if (row.bucket === 'promising') row.rank = ++rank;
       }
       creators.sort(compareContactRecommendations);
 

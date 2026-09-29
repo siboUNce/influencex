@@ -604,14 +604,14 @@ test('cached scan is the only candidate source and local context is merged in on
   assert.equal(res.body.scan.active_run.status, 'running');
 });
 
-test('scan shortlist keeps only top ten eligible creators and ignores AI scores', async () => {
+test('legacy scan shortlist retains all eligible creators and ignores AI scores', async () => {
   const candidates = Array.from({ length: 11 }, (_, i) => scanCandidate(i, { ai_score: 99 - i }));
   const h = scanHarness(candidates);
   const res = makeRes();
   await h.handlers.getContactRecommendations({ workspace: { id: 'ws-scan' } }, res);
-  assert.equal(res.body.summary.promising, 10);
-  assert.equal(res.body.summary.watch, 1);
-  assert.deepEqual(res.body.creators.slice(0, 10).map(r => r.rank), [1,2,3,4,5,6,7,8,9,10]);
+  assert.equal(res.body.summary.promising, 11);
+  assert.equal(res.body.summary.watch, 0);
+  assert.deepEqual(res.body.creators.map(r => r.rank), [1,2,3,4,5,6,7,8,9,10,11]);
   assert.equal(res.body.creators[0].creator_id, 'creator-10');
   assert.equal(res.body.creators[10].creator_id, 'creator-0');
   for (const row of res.body.creators) {
@@ -633,6 +633,117 @@ test('local negative overrides survive scan discovery and different platforms do
   assert.equal(res.body.summary.already_contacted, 1);
   assert.equal(res.body.creators[0].kol_id, null);
   assert.equal(res.body.creators[0].bucket, 'promising');
+});
+
+test('explicit analyzed tiers remain promising despite missing legacy readiness', () => {
+  for (const candidate_tier of ['decision_grade', 'deep_analyzed']) {
+    const analysis = scanCandidate(1, { candidate_tier, analysis_status: 'missing', evidence_quality: {} });
+    assert.deepEqual(classifyContactRecommendation({ kol: analysis, analysis }), {
+      bucket: 'promising', reason_codes: [candidate_tier],
+    });
+  }
+});
+
+test('all 50 analyzer candidates flow through with tiers, upstream ordering and no paid work', async () => {
+  const candidates = Array.from({ length: 50 }, (_, index) => {
+    const candidate_tier = index < 4 ? 'decision_grade' : index < 6 ? 'deep_analyzed' : 'discovery_only';
+    return scanCandidate(index, {
+      candidate_tier, selection_rank: 50 - index,
+      enrichment_status: candidate_tier === 'discovery_only' ? 'not_selected' : 'completed',
+      eligibility: { classification: 'ELIGIBLE_INFLUENCER' },
+      analysis_status: candidate_tier === 'discovery_only' ? 'missing' : 'available',
+      evidence_quality: candidate_tier === 'discovery_only' ? {} : {
+        readiness: candidate_tier === 'decision_grade' ? 'decision_grade' : 'directional',
+        decision_ready: candidate_tier === 'decision_grade',
+      },
+    });
+  });
+  const h = scanHarness([...candidates].reverse());
+  const res = makeRes();
+  await h.handlers.getContactRecommendations({ workspace: { id: 'ws-scan' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.creators.length, 50);
+  assert.deepEqual(res.body.summary, { promising: 50, watch: 0, need_more_data: 0, already_contacted: 0, skip: 0 });
+  const expected = [candidates.slice(0, 4), candidates.slice(4, 6), candidates.slice(6)].flatMap(group => group.reverse());
+  assert.deepEqual(res.body.creators.map(row => row.creator_id), expected.map(row => row.creator_id));
+  assert.deepEqual(res.body.creators.map(row => row.rank), Array.from({ length: 50 }, (_, i) => i + 1));
+  for (const row of res.body.creators) {
+    const original = candidates.find(candidate => candidate.creator_id === row.creator_id);
+    for (const key of ['candidate_tier', 'selection_rank', 'enrichment_status', 'analysis_status', 'analyzed_at',
+      'observed_metrics', 'evidence_quality', 'eligibility', 'discovery_provenance']) {
+      assert.deepEqual(row[key], original[key], key);
+    }
+    if (row.candidate_tier === 'discovery_only') {
+      assert.deepEqual(row.reason_codes, ['discovery_only']);
+      assert.notEqual(row.evidence_quality.readiness, 'decision_grade');
+    }
+  }
+  assert.deepEqual(h.calls, { scan: 1, sql: 1, forbidden: 0 });
+});
+
+test('upstream exclusions win over every tier and contradictory legacy eligibility', () => {
+  for (const candidate_tier of ['decision_grade', 'deep_analyzed', 'discovery_only']) {
+    for (const eligibility of [
+      { classification: 'BUSINESS_ACCOUNT', eligible: true },
+      { classification: 'NOT_ELIGIBLE' }, { eligible: false },
+    ]) {
+      const analysis = scanCandidate(0, { candidate_tier, eligibility });
+      assert.deepEqual(classifyContactRecommendation({ kol: analysis, analysis }), {
+        bucket: 'skip', reason_codes: ['ineligible_candidate'],
+      });
+    }
+  }
+});
+
+test('discovery tier requires upstream eligibility and cannot inherit decision-grade readiness', () => {
+  for (const eligibility of [{ classification: 'ELIGIBLE_INFLUENCER' }, { eligible: true }, {}]) {
+    const analysis = scanCandidate(0, { candidate_tier: 'discovery_only', eligibility });
+    assert.deepEqual(classifyContactRecommendation({ kol: analysis, analysis }), {
+      bucket: Object.keys(eligibility).length ? 'promising' : 'need_more_data', reason_codes: ['discovery_only'],
+    });
+  }
+});
+
+test('candidate tiers cannot override clinic decisions or unsupported platforms', async () => {
+  for (const candidate_tier of ['decision_grade', 'deep_analyzed', 'discovery_only']) {
+    const h = scanHarness(Array.from({ length: 6 }, (_, i) => scanCandidate(i, { candidate_tier })), [
+      { username: 'creator-0', platform: 'tiktok', clinic_status: 'contacted' },
+      { username: 'creator-1', platform: 'tiktok', clinic_status: 'worked_with' },
+      { username: 'creator-2', platform: 'tiktok', clinic_status: 'not_selected' },
+      { username: 'creator-3', platform: 'tiktok', clinic_rating: 2 },
+      { username: 'creator-4', platform: 'tiktok', clinic_rating: 1 },
+    ]);
+    const res = makeRes();
+    await h.handlers.getContactRecommendations({ workspace: { id: 'ws-scan' } }, res);
+    assert.equal(res.body.summary.already_contacted, 2);
+    assert.equal(res.body.summary.skip, 3);
+    assert.ok(res.body.creators.every(row => row.candidate_tier === candidate_tier));
+    const unsupported = scanCandidate(1, { candidate_tier, platform: 'instagram' });
+    assert.deepEqual(classifyContactRecommendation({ kol: unsupported, analysis: unsupported }), {
+      bucket: 'need_more_data', reason_codes: ['unsupported_platform'],
+    });
+  }
+});
+
+test('tier order precedes upstream rank, which precedes metrics with deterministic fallbacks', () => {
+  const row = (username, candidate_tier, selection_rank, views = 0) => ({
+    username, candidate_tier, selection_rank, bucket: 'promising', observed_metrics: { views_per_follower: views },
+  });
+  const rows = [row('discovery', 'discovery_only', 1, 999), row('deep', 'deep_analyzed', 2),
+    row('decision-second', 'decision_grade', 50, 999), row('decision-first', 'decision_grade', 49),
+    row('missing-z', 'decision_grade', null), row('missing-a', 'decision_grade', undefined)];
+  assert.deepEqual(rows.sort(compareContactRecommendations).map(row => row.username),
+    ['decision-first', 'decision-second', 'missing-a', 'missing-z', 'deep', 'discovery']);
+});
+
+test('browse tiers never bypass evidence or campaign-fit gates for outreach', () => {
+  for (const candidate_tier of ['decision_grade', 'deep_analyzed', 'discovery_only']) {
+    const input = recommendationFixture({ analysis_status: 'missing', readiness: null, decision_ready: false });
+    input.analysis.candidate_tier = candidate_tier;
+    const recommendation = classifyOutreachRecommendation(input);
+    assert.equal(recommendation.bucket, 'need_more_data');
+    assert.equal(recommendation.contactable, false);
+  }
 });
 
 test('scan GET fails with stable 503 instead of silently returning local creators', async () => {

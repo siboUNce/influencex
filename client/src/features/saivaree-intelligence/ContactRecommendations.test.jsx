@@ -152,6 +152,37 @@ it('opens newly discovered profiles safely with unique ranks and never opens a l
   expect(onClose).not.toHaveBeenCalled();
 });
 
+it('renders tier badges and ranks a 50-row shortlist without starting paid actions', async () => {
+  const creators = Array.from({ length: 50 }, (_, index) => {
+    const candidate_tier = index < 4 ? 'decision_grade' : index < 6 ? 'deep_analyzed' : 'discovery_only';
+    return row({
+      kol_id: `kol-${index + 1}`,
+      username: `creator-${index + 1}`,
+      display_name: `Creator ${index + 1}`,
+      candidate_tier,
+      evidence_quality: {
+        readiness: candidate_tier === 'deep_analyzed' ? 'directional' : 'decision_grade',
+        decision_ready: candidate_tier === 'decision_grade',
+      },
+    });
+  });
+  api.getSaivareeContactRecommendations.mockResolvedValue(result(creators));
+
+  renderPanel();
+  await screen.findByText('@creator-1');
+
+  expect(screen.getAllByText('Decision-grade')).toHaveLength(4);
+  expect(screen.getAllByText('Deep analyzed')).toHaveLength(2);
+  expect(screen.getAllByText('Discovery only')).toHaveLength(44);
+  expect(screen.getAllByText('Decision grade')).toHaveLength(4);
+  expect(screen.getByText('#1')).toBeInTheDocument();
+  expect(screen.getByText('#50')).toBeInTheDocument();
+  expect(screen.getAllByRole('button', { name: 'Open' })).toHaveLength(50);
+  expect(screen.queryByRole('button', { name: /Prepare outreach/i })).not.toBeInTheDocument();
+  expect(api.prepareSaivareeOutreach).not.toHaveBeenCalled();
+  expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
+});
+
 it('rejects unsafe external profile URLs', async () => {
   api.getSaivareeContactRecommendations.mockResolvedValue(result([row({ kol_id: null, creator_id: 'unsafe', profile_url: 'javascript:alert(1)' })]));
   renderPanel();

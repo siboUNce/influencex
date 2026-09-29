@@ -10,6 +10,12 @@ const safeProfile = value => {
 };
 
 const BUCKETS = ['promising', 'watch', 'need_more_data', 'already_contacted', 'skip'];
+const CANDIDATE_TIERS = ['decision_grade', 'deep_analyzed', 'discovery_only'];
+
+function candidateTier(row) {
+  if (CANDIDATE_TIERS.includes(row.candidate_tier)) return row.candidate_tier;
+  return null;
+}
 
 function compact(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -200,6 +206,7 @@ export default function ContactRecommendations({
                     {creators.map((row) => {
                       const metrics = row.observed_metrics || {};
                       const evidence = row.evidence_quality || {};
+                      const tier = candidateTier(row);
                       const sampleSize = metrics.sample_size ?? evidence.sample_size;
                       return (
                         <tr key={rowId(row)}>
@@ -216,6 +223,9 @@ export default function ContactRecommendations({
                             }>
                               {t(`kol_db.contact_rec_bucket_${row.bucket}`)}
                             </span>
+                            {tier && <span className={`badge ${tier === 'decision_grade' ? 'badge-green' : tier === 'deep_analyzed' ? 'badge-orange' : ''}`} style={{ marginLeft: 4 }}>
+                              {t(`kol_db.contact_rec_tier_${tier}`)}
+                            </span>}
                             {row.reason_codes?.[0] && (
                               <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
                                 {t(`kol_db.contact_rec_reason_${row.reason_codes[0]}`)}
@@ -225,7 +235,7 @@ export default function ContactRecommendations({
                           <td>
                             <div>{sampleSize == null ? '-' : t('kol_db.contact_rec_sample', { count: sampleSize })}</div>
                             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                              {evidence.readiness ? t(`kol_db.contact_rec_readiness_${evidence.readiness}`) : '-'}
+                              {tier === 'discovery_only' ? '-' : evidence.readiness ? t(`kol_db.contact_rec_readiness_${evidence.readiness}`) : '-'}
                             </div>
                           </td>
                           <td>{compact(metrics.recent_weighted_median_views)}</td>
