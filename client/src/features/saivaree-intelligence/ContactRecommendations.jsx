@@ -11,6 +11,8 @@ const safeProfile = value => {
 
 const BUCKETS = ['promising', 'watch', 'need_more_data', 'already_contacted', 'skip'];
 const CANDIDATE_TIERS = ['decision_grade', 'deep_analyzed', 'discovery_only'];
+const DEEP_STATES = ['queued', 'running', 'deep_analyzed', 'decision_grade', 'failed', 'skipped_budget'];
+const creatorKey = row => row.creator_id || row.kol_id || rowId(row);
 
 function candidateTier(row) {
   if (CANDIDATE_TIERS.includes(row.candidate_tier)) return row.candidate_tier;
@@ -44,13 +46,12 @@ export default function ContactRecommendations({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
-  const [refreshing, setRefreshing] = useState(false);
-  const [waitingForScan, setWaitingForScan] = useState(false);
   const [pollEpoch, setPollEpoch] = useState(0);
   const [pollStopped, setPollStopped] = useState(false);
+  const [rowActions, setRowActions] = useState({});
   const mounted = useRef(false);
-  const posting = useRef(false);
-  const pendingScan = useRef(null);
+  const submitting = useRef(new Set());
+  const pending = useRef(new Set());
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   useEffect(() => {
@@ -61,32 +62,29 @@ export default function ContactRecommendations({
     function pollAgain() {
       if (++polls < 100) timer = setTimeout(load, 3000);
       else {
-        pendingScan.current = null;
-        setWaitingForScan(false);
         setPollStopped(true);
       }
     }
     async function load() {
       try {
-        const result = await api.getSaivareeContactRecommendations();
+        const result = await api.getSaivareeCreatorDiscovery();
         if (!active) return;
         setData(result);
-        setError(false);
-        const pending = pendingScan.current;
-        if (pending) {
-          const runs = [result.scan?.active_run, result.scan?.latest_run, result.scan?.latest_completed_run];
-          const observed = runs.find(run => run?.id && (pending.id
-            ? run.id === pending.id : !pending.previousIds.includes(run.id)));
-          if (observed && ['completed', 'failed', 'cancelled'].includes(observed.status)) {
-            pendingScan.current = null;
+        for (const row of result.creators || []) {
+          const key = creatorKey(row);
+          if (pending.current.has(key) && ['deep_analyzed', 'decision_grade'].includes(row.candidate_tier)) {
+            pending.current.delete(key);
+            setRowActions(previous => ({ ...previous, [key]: 'success' }));
+          } else if (pending.current.has(key) && ['failed', 'skipped_budget'].includes(row.enrichment_status)) {
+            pending.current.delete(key);
+            setRowActions(previous => ({ ...previous, [key]: 'error' }));
           }
         }
-        setWaitingForScan(Boolean(pendingScan.current));
-        if (pendingScan.current || isActive(result.scan?.active_run)) pollAgain();
+        setError(false);
+        if (isActive(result.scan?.active_run) || pending.current.size) pollAgain();
       } catch {
         if (active) {
           setError(true);
-          if (pendingScan.current) pollAgain();
         }
       } finally {
         if (active) setLoading(false);
@@ -96,24 +94,28 @@ export default function ContactRecommendations({
     return () => { active = false; clearTimeout(timer); };
   }, [pollEpoch]);
 
-  async function refresh() {
-    if (posting.current || pendingScan.current || loading || waitingForScan || isActive(data?.scan?.active_run)) return;
-    posting.current = true;
-    setRefreshing(true);
+  async function analyzeCreator(row) {
+    const key = creatorKey(row);
+    if (submitting.current.has(key) || pending.current.has(key)) return;
+    submitting.current.add(key);
+    setRowActions(previous => ({ ...previous, [key]: 'submitting' }));
     try {
-      const run = await api.refreshSaivareeContactRecommendations();
+      let kolId = row.kol_id;
+      if (!kolId) {
+        const resolved = await api.ensureSaivareeDiscoveryKol(row.creator_id);
+        kolId = resolved.kol_id;
+        if (!mounted.current) return;
+        if (!kolId) throw new Error('Missing KOL identity');
+      }
+      await api.analyzeSaivareeKol(kolId);
       if (!mounted.current) return;
-      pendingScan.current = {
-        id: run?.id,
-        previousIds: [data?.scan?.active_run?.id, data?.scan?.latest_run?.id, data?.scan?.latest_completed_run?.id].filter(Boolean),
-      };
-      setWaitingForScan(true);
+      pending.current.add(key);
+      setRowActions(previous => ({ ...previous, [key]: 'queued' }));
       setPollEpoch(epoch => epoch + 1);
     } catch {
-      if (mounted.current) setError(true);
+      if (mounted.current) setRowActions(previous => ({ ...previous, [key]: 'error' }));
     } finally {
-      posting.current = false;
-      if (mounted.current) setRefreshing(false);
+      submitting.current.delete(key);
     }
   }
 
@@ -129,6 +131,12 @@ export default function ContactRecommendations({
 
   const summary = data?.summary || {};
   const creators = data?.creators || [];
+  const sections = [
+    { id: 'top', rows: creators.filter(row => ['decision_grade', 'deep_analyzed'].includes(row.candidate_tier)) },
+    { id: 'promising', rows: creators.filter(row => row.candidate_tier === 'discovery_only') },
+  ];
+  const legacyRows = creators.filter(row => !CANDIDATE_TIERS.includes(row.candidate_tier));
+  if (legacyRows.length) sections.push({ id: 'other', rows: legacyRows });
   const promisingRanks = new Map(creators.filter(row => row.bucket === 'promising').map((row, index) => [rowId(row), index + 1]));
 
   return (
@@ -148,13 +156,12 @@ export default function ContactRecommendations({
       </div>
 
       <div className="modal-body">
-        <button type="button" className="btn btn-primary" onClick={refresh}
-          disabled={loading || refreshing || waitingForScan || isActive(data?.scan?.active_run)}>
-          {t('kol_db.contact_rec_refresh')}
+        <button type="button" className="btn btn-secondary" onClick={() => setPollEpoch(epoch => epoch + 1)} disabled={loading}>
+          {t('kol_db.discovery_reload')}
         </button>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('kol_db.discovery_analysis_cost')}</p>
         <div role="status" style={{ margin: '10px 0', fontSize: 13 }}>
           {t('kol_db.contact_rec_scan_status', { status: t(`kol_db.contact_rec_scan_${
-            refreshing || (waitingForScan && !isActive(data?.scan?.active_run)) ? 'queued' :
               ['queued', 'running', 'completed', 'failed', 'cancelled'].includes((data?.scan?.active_run || data?.scan?.latest_run)?.status)
                 ? (data.scan.active_run || data.scan.latest_run).status : 'idle'
           }`) })}
@@ -172,7 +179,7 @@ export default function ContactRecommendations({
         )}
 
         {!loading && data && (
-          <>
+          <div>
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 8, marginBottom: 14 }}>
               {BUCKETS.map((bucket) => (
                 <div className="stat-card" key={bucket} style={{ minHeight: 72 }}>
@@ -184,9 +191,11 @@ export default function ContactRecommendations({
               ))}
             </div>
 
-            {creators.length === 0 ? (
-              <div style={{ color: 'var(--text-muted)' }}>{t('kol_db.contact_rec_empty')}</div>
-            ) : (
+            {creators.length === 0 && <p>{t('kol_db.contact_rec_empty')}</p>}
+            {sections.map(section => <section key={section.id} aria-labelledby={`discovery-${section.id}`} style={{ marginTop: 20 }}>
+              <h4 id={`discovery-${section.id}`} style={{ marginBottom: 4 }}>{t(`kol_db.discovery_section_${section.id}`)} ({section.rows.length})</h4>
+              <p style={{ marginTop: 0, fontSize: 12, color: 'var(--text-muted)' }}>{t(`kol_db.discovery_section_${section.id}_body`)}</p>
+              {section.rows.length === 0 ? <p>{t(`kol_db.discovery_section_${section.id}_empty`)}</p> : (
               <div className="table-container">
                 <table>
                   <thead>
@@ -203,10 +212,12 @@ export default function ContactRecommendations({
                     </tr>
                   </thead>
                   <tbody>
-                    {creators.map((row) => {
+                    {section.rows.map((row) => {
                       const metrics = row.observed_metrics || {};
                       const evidence = row.evidence_quality || {};
                       const tier = candidateTier(row);
+                      const state = row.enrichment_status;
+                      const action = rowActions[creatorKey(row)];
                       const sampleSize = metrics.sample_size ?? evidence.sample_size;
                       return (
                         <tr key={rowId(row)}>
@@ -226,6 +237,9 @@ export default function ContactRecommendations({
                             {tier && <span className={`badge ${tier === 'decision_grade' ? 'badge-green' : tier === 'deep_analyzed' ? 'badge-orange' : ''}`} style={{ marginLeft: 4 }}>
                               {t(`kol_db.contact_rec_tier_${tier}`)}
                             </span>}
+                            {DEEP_STATES.includes(state) && !CANDIDATE_TIERS.includes(state) && <div style={{ marginTop: 4 }}>
+                              <span className={`badge ${state === 'failed' ? 'badge-red' : 'badge-orange'}`}>{t(`kol_db.deep_state_${state}`)}</span>
+                            </div>}
                             {row.reason_codes?.[0] && (
                               <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
                                 {t(`kol_db.contact_rec_reason_${row.reason_codes[0]}`)}
@@ -244,6 +258,14 @@ export default function ContactRecommendations({
                           <td>{metrics.views_per_follower == null ? '-' : Number(metrics.views_per_follower).toFixed(4)}</td>
                           <td>{row.email || t('kol_db.contact_rec_no_email')}</td>
                           <td>
+                            {tier === 'discovery_only' && !['skip', 'already_contacted'].includes(row.bucket) && row.platform === 'tiktok' && <button
+                              type="button" className="btn btn-sm btn-secondary" onClick={() => analyzeCreator(row)}
+                              disabled={['submitting', 'queued'].includes(action) || ['queued', 'running'].includes(state) || (!row.kol_id && !row.creator_id)} style={{ marginRight: 4 }}>
+                              {t(action === 'submitting' ? 'kol_db.discovery_analyzing' : 'kol_db.deep_analyze')}
+                            </button>}
+                            {action && <div role={action === 'error' ? 'alert' : 'status'} style={{ marginTop: 4, fontSize: 12 }}>
+                              {t(`kol_db.discovery_action_${action}`)}
+                            </div>}
                             <button type="button" className="btn btn-sm btn-secondary" disabled={!row.kol_id && !safeProfile(row.profile_url)} onClick={() => openCreator(row)}>
                               {t('kol_db.contact_rec_open')}
                             </button>
@@ -254,8 +276,9 @@ export default function ContactRecommendations({
                   </tbody>
                 </table>
               </div>
-            )}
-          </>
+              )}
+            </section>)}
+          </div>
         )}
       </div>
 

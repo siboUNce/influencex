@@ -50,12 +50,12 @@ function createAnalyzerClient({
     }
   }
 
-  async function requireOk(path, options) {
+  async function requireOk(path, options, { safeErrors = false } = {}) {
     const { response, payload } = await call(path, options);
     if (!response.ok) {
       if (response.status >= 500) throw new AnalyzerUnavailableError();
-      const error = new Error(payload?.detail || 'Saivaree Analyzer request failed');
-      error.code = 'analyzer_request_failed';
+      const error = new Error(safeErrors ? 'Saivaree Analyzer request failed' : (payload?.detail || 'Saivaree Analyzer request failed'));
+      error.code = safeErrors && response.status === 409 ? 'stale_plan' : 'analyzer_request_failed';
       error.status = response.status;
       throw error;
     }
@@ -106,6 +106,39 @@ function createAnalyzerClient({
       return requireOk('/internal/influencex/promising-stars/refresh', {
         method: 'POST', body: JSON.stringify({ request_id: requestId }),
       });
+    },
+
+    async getCreatorDiscovery() {
+      try {
+        return await requireOk('/internal/influencex/creator-discovery', undefined, { safeErrors: true });
+      } catch (error) {
+        // Older Analyzer releases expose the same cached browse data under this name.
+        if (error.status !== 404) throw error;
+        return requireOk('/internal/influencex/promising-stars', undefined, { safeErrors: true });
+      }
+    },
+
+    async createDeepAnalysisPlan({ sourceRunId, creatorRefs } = {}) {
+      const body = { source_run_id: sourceRunId };
+      if (creatorRefs !== undefined) body.creator_refs = creatorRefs;
+      return requireOk('/internal/influencex/deep-analysis/plan', {
+        method: 'POST', body: JSON.stringify(body),
+      }, { safeErrors: true });
+    },
+
+    async executeDeepAnalysis({ sourceRunId, creatorRefs, planToken, requestId } = {}) {
+      return requireOk('/internal/influencex/deep-analysis/execute', {
+        method: 'POST',
+        body: JSON.stringify({ source_run_id: sourceRunId, creator_refs: creatorRefs, plan_token: planToken, request_id: requestId }),
+      }, { safeErrors: true });
+    },
+
+    async getDeepAnalysisJob(runId) {
+      return requireOk('/internal/influencex/deep-analysis/jobs/' + encodeURIComponent(String(runId)), undefined, { safeErrors: true });
+    },
+
+    async getDeepAnalysisCreator(creatorRef) {
+      return requireOk('/internal/influencex/deep-analysis/creators/' + encodeURIComponent(String(creatorRef)), undefined, { safeErrors: true });
     },
 
     async getSettings() {

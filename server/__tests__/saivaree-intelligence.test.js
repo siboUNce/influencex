@@ -635,6 +635,31 @@ test('local negative overrides survive scan discovery and different platforms do
   assert.equal(res.body.creators[0].bucket, 'promising');
 });
 
+test('deep analysis analyzer client uses exact internal routes and bodies', async () => {
+  const calls = [];
+  const client = createAnalyzerClient({ baseUrl: 'http://analyzer.test', apiKey: 'k', fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return fakeResponse(url.endsWith('/execute') ? 202 : 200, { ok: true });
+  } });
+  await client.getCreatorDiscovery();
+  await client.createDeepAnalysisPlan({ sourceRunId: '11111111-1111-4111-8111-111111111111' });
+  await client.createDeepAnalysisPlan({ sourceRunId: '11111111-1111-4111-8111-111111111111', creatorRefs: ['22222222-2222-4222-8222-222222222222'] });
+  await client.executeDeepAnalysis({ sourceRunId: '11111111-1111-4111-8111-111111111111', creatorRefs: ['22222222-2222-4222-8222-222222222222'], planToken: 'a'.repeat(64), requestId: 'request-1' });
+  await client.getDeepAnalysisJob('11111111-1111-4111-8111-111111111111');
+  await client.getDeepAnalysisCreator('33333333-3333-4333-8333-333333333333');
+  assert.deepEqual(calls.map(call => call.url), [
+    'http://analyzer.test/internal/influencex/creator-discovery',
+    'http://analyzer.test/internal/influencex/deep-analysis/plan',
+    'http://analyzer.test/internal/influencex/deep-analysis/plan',
+    'http://analyzer.test/internal/influencex/deep-analysis/execute',
+    'http://analyzer.test/internal/influencex/deep-analysis/jobs/11111111-1111-4111-8111-111111111111',
+    'http://analyzer.test/internal/influencex/deep-analysis/creators/33333333-3333-4333-8333-333333333333',
+  ]);
+  assert.deepEqual(JSON.parse(calls[1].options.body), { source_run_id: '11111111-1111-4111-8111-111111111111' });
+  assert.deepEqual(JSON.parse(calls[2].options.body), { source_run_id: '11111111-1111-4111-8111-111111111111', creator_refs: ['22222222-2222-4222-8222-222222222222'] });
+  assert.deepEqual(JSON.parse(calls[3].options.body), { source_run_id: '11111111-1111-4111-8111-111111111111', creator_refs: ['22222222-2222-4222-8222-222222222222'], plan_token: 'a'.repeat(64), request_id: 'request-1' });
+});
+
 test('explicit analyzed tiers remain promising despite missing legacy readiness', () => {
   for (const candidate_tier of ['decision_grade', 'deep_analyzed']) {
     const analysis = scanCandidate(1, { candidate_tier, analysis_status: 'missing', evidence_quality: {} });
@@ -806,6 +831,223 @@ test('refresh maps unavailable and safe Analyzer rejection statuses without retr
     assert.equal(res.statusCode, status);
     assert.equal(calls, 1);
     assert.doesNotMatch(JSON.stringify(res.body), /secret/);
+  }
+});
+
+test('creator discovery proxy shares browse mapping and preserves local overrides', async () => {
+  const localDb = { query: async () => ({ rows: [
+    { id: 'local-1', platform: 'tiktok', username: '@creator-1', email: 'x@example.com', clinic_status: 'contacted', clinic_rating: 5 },
+    { id: 'local-2', platform: 'tiktok', username: 'creator-2', email: '', clinic_status: 'not_selected', clinic_rating: 1 },
+  ] }) };
+  const mappedHandlers = createSaivareeHandlers({ db: localDb, analyzer: { getCreatorDiscovery: async () => ({ candidates: Array.from({ length: 50 }, (_, i) => scanCandidate(i)), latest_completed_run: { id: 'run-1' } }) } });
+  const res = makeRes();
+  await mappedHandlers.getCreatorDiscovery({ workspace: { id: 'ws' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.creators.length, 50);
+  assert.equal(res.body.scan.latest_completed_run.id, 'run-1');
+  assert.equal(res.body.creators.find(row => row.username === 'creator-1').clinic_status, 'contacted');
+  assert.equal(res.body.creators.find(row => row.username === 'creator-2').bucket, 'skip');
+});
+
+test('deep analysis proxy validates UUID refs and unknown body keys without calling Analyzer', async () => {
+  let calls = 0;
+  const handlers = createSaivareeHandlers({ db: {}, analyzer: { async createDeepAnalysisPlan() { calls++; } } });
+  const invalid = makeRes();
+  await handlers.createDeepAnalysisPlan({ body: { source_run_id: 'not-a-uuid', unsafe: 'x' } }, invalid);
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(calls, 0);
+  const duplicate = makeRes();
+  await handlers.createDeepAnalysisPlan({ body: { source_run_id: '11111111-1111-4111-8111-111111111111', creator_refs: ['22222222-2222-4222-8222-222222222222', '22222222-2222-4222-8222-222222222222'] } }, duplicate);
+  assert.equal(duplicate.statusCode, 400);
+  assert.equal(calls, 0);
+});
+
+test('deep analysis execute forwards exact request and maps stale plan once', async () => {
+  let calls = 0;
+  const args = [];
+  const handlers = createSaivareeHandlers({ db: {}, analyzer: { async executeDeepAnalysis(body) { calls++; args.push(body); throw Object.assign(new Error('secret'), { status: 409 }); } } });
+  const res = makeRes();
+  await handlers.executeDeepAnalysis({ body: { source_run_id: '11111111-1111-4111-8111-111111111111', creator_refs: ['22222222-2222-4222-8222-222222222222'], plan_token: 'a'.repeat(64), request_id: 'browser-request' } }, res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, 'stale_plan');
+  assert.doesNotMatch(JSON.stringify(res.body), /secret/);
+  assert.equal(calls, 1);
+  assert.deepEqual(args[0], { sourceRunId: '11111111-1111-4111-8111-111111111111', creatorRefs: ['22222222-2222-4222-8222-222222222222'], planToken: 'a'.repeat(64), requestId: 'browser-request' });
+});
+
+test('deep analysis execute success, status, and lookup proxies pass through exactly once', async () => {
+  const calls = [];
+  const analyzer = {
+    async executeDeepAnalysis(body) { calls.push(['execute', body]); return { run: { id: 'run-1' } }; },
+    async getDeepAnalysisJob(id) { calls.push(['job', id]); return { id }; },
+    async getDeepAnalysisCreator(ref) { calls.push(['creator', ref]); return { creator_ref: ref }; },
+  };
+  const handlers = createSaivareeHandlers({ db: {}, analyzer });
+  const execute = makeRes();
+  await handlers.executeDeepAnalysis({ body: { source_run_id: '11111111-1111-4111-8111-111111111111', creator_refs: ['22222222-2222-4222-8222-222222222222'], plan_token: 'b'.repeat(64), request_id: 'browser-request' } }, execute);
+  assert.equal(execute.statusCode, 202);
+  const job = makeRes();
+  await handlers.getDeepAnalysisJob({ params: { runId: 'run-1' } }, job);
+  const creator = makeRes();
+  await handlers.getDeepAnalysisCreator({ params: { creatorRef: '22222222-2222-4222-8222-222222222222' } }, creator);
+  assert.equal(job.body.id, 'run-1');
+  assert.equal(creator.body.creator_ref, '22222222-2222-4222-8222-222222222222');
+  assert.equal(calls.length, 3);
+});
+
+test('deep analysis execute rejects unsafe request ids and malformed lookup ids without calls', async () => {
+  let calls = 0;
+  const handlers = createSaivareeHandlers({ db: {}, analyzer: { async executeDeepAnalysis() { calls++; }, async getDeepAnalysisJob() { calls++; }, async getDeepAnalysisCreator() { calls++; } } });
+  const badRequest = makeRes();
+  await handlers.executeDeepAnalysis({ body: { source_run_id: '11111111-1111-4111-8111-111111111111', creator_refs: ['22222222-2222-4222-8222-222222222222'], plan_token: 'a'.repeat(64), request_id: 'bad/id' } }, badRequest);
+  const badJob = makeRes();
+  await handlers.getDeepAnalysisJob({ params: { runId: '../run' } }, badJob);
+  const badCreator = makeRes();
+  await handlers.getDeepAnalysisCreator({ params: { creatorRef: 'not-a-uuid' } }, badCreator);
+  assert.equal(badRequest.statusCode, 400);
+  assert.equal(badJob.statusCode, 400);
+  assert.equal(badCreator.statusCode, 400);
+  assert.equal(calls, 0);
+});
+
+test('creator discovery bridge reuses a workspace KOL and never starts paid analysis', async () => {
+  const candidate = scanCandidate(1, { candidate_tier: 'discovery_only', eligibility: { classification: 'ELIGIBLE_INFLUENCER' } });
+  candidate.creator_id = '11111111-1111-4111-8111-111111111111';
+  const calls = { analyze: 0, refresh: 0, query: 0 };
+  const local = { id: 'local-kol', workspace_id: 'ws-a', platform: 'tiktok', username: 'creator-1', saivaree_creator_id: candidate.creator_id, clinic_status: 'watching', clinic_rating: null };
+  const db = {
+    async queryOne(sql, params) { calls.query++; if (/kol_database/i.test(sql)) return local; if (/saivaree_kol_meta/i.test(sql)) return local; return null; },
+    async exec() { throw new Error('must not write on reuse'); },
+  };
+  const analyzer = { async getCreatorDiscovery() { return { candidates: [candidate] }; }, async analyze() { calls.analyze++; }, async refreshPromisingStars() { calls.refresh++; } };
+  const handlers = createSaivareeHandlers({ db, analyzer });
+  const res = makeRes();
+  await handlers.bridgeCreatorDiscovery({ workspace: { id: 'ws-a' }, params: { creatorRef: candidate.creator_id }, body: {} }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { kol_id: 'local-kol' });
+  assert.equal(calls.analyze, 0);
+  assert.equal(calls.refresh, 0);
+});
+
+test('creator discovery bridge creates an idempotent local KOL from an eligible cached candidate', async () => {
+  const candidate = scanCandidate(2, { candidate_tier: 'discovery_only', eligibility: { classification: 'ELIGIBLE_INFLUENCER' } });
+  candidate.creator_id = '22222222-2222-4222-8222-222222222222';
+  const inserts = [];
+  const db = {
+    async queryOne(sql) { if (/kol_database/i.test(sql)) return null; if (/saivaree_kol_meta/i.test(sql)) return null; return null; },
+    async exec(sql, params) { inserts.push({ sql, params }); },
+  };
+  const handlers = createSaivareeHandlers({ db, analyzer: { async getCreatorDiscovery() { return { candidates: [candidate] }; } } });
+  const res = makeRes();
+  await handlers.bridgeCreatorDiscovery({ workspace: { id: 'ws-a' }, params: { creatorRef: candidate.creator_id }, body: {} }, res);
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.kol_id, /^discovery-[0-9a-f]{40}$/);
+  assert.equal(inserts.length, 2);
+  assert.match(inserts[0].sql, /INSERT INTO kol_database/i);
+  assert.match(inserts[1].sql, /INSERT INTO saivaree_kol_meta/i);
+});
+
+test('creator discovery bridge recovers a concurrent deterministic identity insert', async () => {
+  const candidate = scanCandidate(4, { candidate_tier: 'discovery_only', eligibility: { classification: 'ELIGIBLE_INFLUENCER' } });
+  candidate.creator_id = '44444444-4444-4444-8444-444444444444';
+  let inserts = 0;
+  const db = {
+    async queryOne(sql, params) {
+      if (/WHERE id = \?/i.test(sql)) return { id: params[0], workspace_id: 'ws-a', platform: 'tiktok', username: 'creator-4', saivaree_creator_id: candidate.creator_id, clinic_status: 'watching' };
+      if (/kol_database/i.test(sql)) return null;
+      return { id: params[1], platform: 'tiktok', username: 'creator-4', saivaree_creator_id: candidate.creator_id, clinic_status: 'watching' };
+    },
+    async exec(sql) { inserts++; if (/INSERT INTO kol_database/i.test(sql)) throw Object.assign(new Error('UNIQUE constraint failed'), { code: 'SQLITE_CONSTRAINT_PRIMARYKEY' }); },
+  };
+  const handlers = createSaivareeHandlers({ db, analyzer: { async getCreatorDiscovery() { return { candidates: [candidate] }; } } });
+  const res = makeRes();
+  await handlers.bridgeCreatorDiscovery({ workspace: { id: 'ws-a' }, params: { creatorRef: candidate.creator_id }, body: {} }, res);
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.kol_id, /^discovery-[0-9a-f]{40}$/);
+  assert.equal(inserts, 2);
+});
+
+test('creator discovery bridge uses the real schema and reuses its deterministic row', async () => {
+  const workspaceId = `bridge-real-${process.pid}`;
+  const creatorRef = '55555555-5555-4555-8555-555555555555';
+  const candidate = scanCandidate(5, { creator_id: creatorRef, candidate_tier: 'discovery_only', eligibility: { classification: 'ELIGIBLE_INFLUENCER' }, username: ' @Bridge.Real ' });
+  const handlers = createSaivareeHandlers({ db: { query, queryOne, exec }, analyzer: { async getCreatorDiscovery() { return { candidates: [candidate] }; } } });
+  const req = { workspace: { id: workspaceId }, params: { creatorRef }, body: {} };
+  const first = makeRes();
+  await handlers.bridgeCreatorDiscovery(req, first);
+  const second = makeRes();
+  await handlers.bridgeCreatorDiscovery(req, second);
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(second.body, first.body);
+  const count = await queryOne('SELECT COUNT(*) AS n FROM kol_database WHERE workspace_id = ? AND platform = ? AND username = ?', [workspaceId, 'tiktok', 'bridge.real']);
+  assert.equal(Number(count.n), 1);
+  const meta = await queryOne('SELECT saivaree_creator_id FROM saivaree_kol_meta WHERE workspace_id = ? AND kol_database_id = ?', [workspaceId, first.body.kol_id]);
+  assert.equal(meta.saivaree_creator_id, creatorRef);
+});
+
+test('creator discovery bridge rejects unknown, unsupported, ineligible, and negative clinic candidates', async () => {
+  const base = scanCandidate(3, { candidate_tier: 'discovery_only', eligibility: { classification: 'ELIGIBLE_INFLUENCER' } });
+  base.creator_id = '33333333-3333-4333-8333-333333333333';
+  const local = { id: 'local', platform: 'tiktok', username: 'creator-3', clinic_status: 'contacted', clinic_rating: 5 };
+  const db = { async queryOne(sql) { if (/kol_database/i.test(sql)) return local; if (/saivaree_kol_meta/i.test(sql)) return local; return null; }, async exec() { throw new Error('must not write'); } };
+  let current = base;
+  const handlers = createSaivareeHandlers({ db, analyzer: { async getCreatorDiscovery() { return { candidates: current ? [current] : [] }; } } });
+  for (const [candidate, status] of [[null, 404], [{ ...base, platform: 'instagram' }, 400], [{ ...base, eligibility: { classification: 'INELIGIBLE' } }, 409], [base, 409]]) {
+    current = candidate;
+    const res = makeRes();
+    await handlers.bridgeCreatorDiscovery({ workspace: { id: 'ws-a' }, params: { creatorRef: candidate?.creator_id || base.creator_id }, body: {} }, res);
+    assert.equal(res.statusCode, status);
+  }
+});
+
+test('deep analysis guards malformed bodies, tokens, duplicate UUID casing and path traversal', async () => {
+  const source_run_id = '11111111-1111-4111-8111-111111111111';
+  const creator = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  let calls = 0;
+  const forbidden = async () => { calls++; throw Error('must not call analyzer'); };
+  const handlers = createSaivareeHandlers({ db: {}, analyzer: { createDeepAnalysisPlan: forbidden, executeDeepAnalysis: forbidden, getDeepAnalysisJob: forbidden } });
+  for (const body of [null, [], {}, { source_run_id, creator_refs: [] }, { source_run_id, creator_refs: 'bad' },
+    { source_run_id, creator_refs: Array(51).fill(creator) }, { source_run_id, creator_refs: [creator, creator.toUpperCase()] },
+    { source_run_id, creator_refs: [null] }, { source_run_id, headers: {} }]) {
+    const res = makeRes(); await handlers.createDeepAnalysisPlan({ body }, res);
+    assert.equal(res.statusCode, 400, JSON.stringify(body));
+  }
+  const body = { source_run_id, creator_refs: [creator], plan_token: 'a'.repeat(64), request_id: 'request-1' };
+  for (const patch of [{ plan_token: '' }, { plan_token: 'z'.repeat(64) }, { plan_token: 'a'.repeat(65) },
+    { creator_refs: [] }, { request_id: '' }, { request_id: 'x\ny' }, { request_id: 'x'.repeat(129) }, { url: 'https://example.test' }]) {
+    const res = makeRes(); await handlers.executeDeepAnalysis({ body: { ...body, ...patch } }, res);
+    assert.equal(res.statusCode, 400);
+  }
+  for (const runId of ['.', '..', '%2f..', 'https://example.test', 'x\\y', ' x ', 'x'.repeat(129)]) {
+    const res = makeRes(); await handlers.getDeepAnalysisJob({ params: { runId } }, res);
+    assert.equal(res.statusCode, 400, runId);
+  }
+  assert.equal(calls, 0);
+});
+
+test('plan preview is a single read-only call and upstream errors never expose details or retry', async () => {
+  const source_run_id = '11111111-1111-4111-8111-111111111111';
+  const creator_refs = ['22222222-2222-4222-8222-222222222222'];
+  const body = { source_run_id, creator_refs, plan_token: 'a'.repeat(64), request_id: 'request-1' };
+  const preview = { source_run_id, creator_refs, plan_token: body.plan_token, requested_count: 1, fundable_count: 1 };
+  let calls = 0;
+  const handlers = createSaivareeHandlers({ db: {}, analyzer: {
+    async createDeepAnalysisPlan(args) { calls++; assert.deepEqual(args, { sourceRunId: source_run_id, creatorRefs: undefined }); return preview; },
+    async executeDeepAnalysis() { throw Error('no execution during plan'); },
+  } });
+  const planned = makeRes(); await handlers.createDeepAnalysisPlan({ body: { source_run_id } }, planned);
+  assert.equal(calls, 1); assert.deepEqual(planned.body, preview);
+  for (const status of [400, 404, 409, 422, 429, 503]) {
+    let attempts = 0;
+    const client = createAnalyzerClient({ baseUrl: 'http://analyzer.test', apiKey: 'private-service-key', fetchImpl: async (_url, options) => {
+      attempts++; assert.equal(options.headers['X-InfluenceX-Internal-Key'], 'private-service-key');
+      return fakeResponse(status, { detail: 'private-service-key: secret internals' });
+    } });
+    const handler = createSaivareeHandlers({ db: {}, analyzer: client });
+    const res = makeRes(); await handler.executeDeepAnalysis({ body }, res);
+    assert.equal(res.statusCode, status);
+    assert.doesNotMatch(JSON.stringify(res.body), /private-service-key|secret internals/);
+    assert.equal(attempts, 1);
   }
 });
 
@@ -1196,7 +1438,7 @@ test('route registration does not crash when Analyzer env is not configured', ()
       db: { queryOne: async () => null, exec: async () => {} },
       rbac: fakeRbac,
     }));
-    assert.equal(registrations.length, 11);
+    assert.equal(registrations.length, 17);
     assert.equal(registrations[0][2].permission, 'kol.read');
     assert.equal(registrations[1][2].permission, 'kol.update');
     assert.equal(
@@ -1207,6 +1449,25 @@ test('route registration does not crash when Analyzer env is not configured', ()
       registrations.find(([, path]) => path === '/api/saivaree/contact-recommendations/refresh')[2].permission,
       'kol.update'
     );
+    assert.equal(
+      registrations.find(([, path]) => path === '/api/saivaree/creator-discovery')[2].permission,
+      'kol.read'
+    );
+    assert.equal(
+      registrations.find(([, path]) => path === '/api/saivaree/creator-discovery/:creatorRef/kol')[2].permission,
+      'kol.update'
+    );
+    assert.equal(
+      registrations.find(([, path]) => path === '/api/saivaree/deep-analysis/execute')[2].permission,
+      'kol.update'
+    );
+    for (const path of [
+      '/api/saivaree/deep-analysis/plan',
+      '/api/saivaree/deep-analysis/jobs/:runId',
+      '/api/saivaree/deep-analysis/creators/:creatorRef',
+    ]) {
+      assert.equal(registrations.find(([, registered]) => registered === path)[2].permission, 'kol.read');
+    }
     assert.equal(
       registrations.find(([, path]) => path === '/api/saivaree/kols/:kolId/prepare-outreach')[2].permission,
       'contact.create'
@@ -1219,3 +1480,21 @@ test('route registration does not crash when Analyzer env is not configured', ()
   }
 });
 
+
+test('creator discovery falls back only on 404 to the legacy cached GET without paid calls', async () => {
+  for (const status of [200, 404, 401, 429, 503]) {
+    const calls = [];
+    const scan = { candidates: [scanCandidate(1)] };
+    const client = createAnalyzerClient({ baseUrl: 'http://analyzer.test', apiKey: 'fake-key', fetchImpl: async (url, options) => {
+      calls.push(url);
+      assert.equal(options.method || 'GET', 'GET');
+      assert.equal(options.body, undefined);
+      return fakeResponse(calls.length === 1 ? status : 200, scan);
+    } });
+    if ([200, 404].includes(status)) assert.deepEqual(await client.getCreatorDiscovery(), scan);
+    else await assert.rejects(() => client.getCreatorDiscovery());
+    assert.deepEqual(calls, status === 404
+      ? ['http://analyzer.test/internal/influencex/creator-discovery', 'http://analyzer.test/internal/influencex/promising-stars']
+      : ['http://analyzer.test/internal/influencex/creator-discovery']);
+  }
+});

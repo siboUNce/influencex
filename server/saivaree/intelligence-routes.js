@@ -301,6 +301,74 @@ function validateMetaPatch(body) {
   }
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SAFE_ID_MAX = 128;
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function invalidDeepRequest(message) {
+  const error = new Error(message);
+  error.status = 400;
+  error.code = 'invalid_deep_analysis_request';
+  return error;
+}
+
+function requireUuid(value, field) {
+  if (typeof value !== 'string' || value.length > SAFE_ID_MAX || !UUID_RE.test(value)) {
+    throw invalidDeepRequest(`${field} must be a UUID`);
+  }
+  return value;
+}
+
+function requireBoundedId(value, field) {
+  if (typeof value !== 'string' || value.length > SAFE_ID_MAX || !/^[a-z0-9][a-z0-9_-]*$/i.test(value)) {
+    throw invalidDeepRequest(`${field} must be a bounded identifier`);
+  }
+  return value;
+}
+
+function requireCreatorRefs(value, required = true) {
+  if (value === undefined && !required) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
+    throw invalidDeepRequest('creator_refs must contain 1-50 UUIDs');
+  }
+  const refs = value.map((ref) => requireUuid(ref, 'creator_refs'));
+  if (new Set(refs.map(ref => ref.toLowerCase())).size !== refs.length) throw invalidDeepRequest('creator_refs must not contain duplicates');
+  return refs;
+}
+
+function validateBody(body, allowed) {
+  if (!isPlainObject(body)) throw invalidDeepRequest('request body must be a plain object');
+  const unknown = Object.keys(body).filter(key => !allowed.has(key));
+  if (unknown.length) throw invalidDeepRequest('unknown request field');
+}
+
+function validatePlanBody(body) {
+  validateBody(body, new Set(['source_run_id', 'creator_refs']));
+  return { sourceRunId: requireUuid(body.source_run_id, 'source_run_id'), creatorRefs: requireCreatorRefs(body.creator_refs, false) };
+}
+
+function validateExecuteBody(body) {
+  validateBody(body, new Set(['source_run_id', 'creator_refs', 'plan_token', 'request_id']));
+  const refs = requireCreatorRefs(body.creator_refs, true);
+  if (typeof body.plan_token !== 'string' || !/^[0-9a-f]{64}$/i.test(body.plan_token)) throw invalidDeepRequest('plan_token must be a 64-character hex token');
+  if (typeof body.request_id !== 'string' || !body.request_id.trim() || body.request_id.length > SAFE_ID_MAX || /[\s\u0000-\u001f\u007f\\/?#]/u.test(body.request_id)) throw invalidDeepRequest('request_id must be a bounded non-empty string');
+  return { sourceRunId: requireUuid(body.source_run_id, 'source_run_id'), creatorRefs: refs, planToken: body.plan_token, requestId: body.request_id };
+}
+
+function safeAnalyzerError(error, fallback = 'Deep analysis request failed') {
+  if (error?.code === 'analyzer_unavailable') return { status: 503, body: { error: 'Analyzer unavailable', code: 'analyzer_unavailable' } };
+  if ([400, 404, 409, 422, 429].includes(error?.status)) {
+    const stale = error.status === 409;
+    return { status: error.status, body: { error: stale ? 'Deep analysis plan is stale' : fallback, code: stale ? 'stale_plan' : 'analyzer_request_failed' } };
+  }
+  return { status: 500, body: { error: fallback, code: 'analyzer_request_failed' } };
+}
+
 function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }) {
   async function resolveMapping(workspaceId, kol) {
     let meta = await getSaivareeMeta(db, workspaceId, kol.id);
@@ -476,10 +544,8 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     }
   }
 
-  async function getContactRecommendations(req, res) {
-    try {
+  async function mapRecommendations(req, scan) {
       const workspaceId = req.workspace.id;
-      const scan = await analyzer.getPromisingStars();
       const result = await db.query(
         `SELECT k.id, k.platform, k.username, k.email, m.clinic_status, m.clinic_rating
          FROM kol_database k
@@ -541,13 +607,17 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
           summary[creator.bucket] += 1;
         }
       }
-
-      return res.json({ summary, creators, scan: {
+      return { summary, creators, scan: {
         latest_run: scan.latest_run || null,
         active_run: scan.active_run || null,
         latest_completed_run: scan.latest_completed_run || null,
         funnel: scan.funnel || scan.latest_funnel || {},
-      } });
+      } };
+  }
+
+  async function getContactRecommendations(req, res) {
+    try {
+      return res.json(await mapRecommendations(req, await analyzer.getPromisingStars()));
     } catch (_error) {
       if (_error?.code === 'analyzer_unavailable') return res.status(503).json({ error: 'Analyzer unavailable', code: 'analyzer_unavailable' });
       return res.status(500).json({ error: 'Unable to load contact recommendations' });
@@ -568,6 +638,115 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
         return res.status(error.status).json({ error: 'Candidate refresh could not be queued', code: 'refresh_rejected' });
       }
       return res.status(500).json({ error: 'Unable to refresh candidates', code: 'refresh_failed' });
+    }
+  }
+
+  async function getCreatorDiscovery(req, res) {
+    try {
+      return res.json(await mapRecommendations(req, await analyzer.getCreatorDiscovery()));
+    } catch (error) {
+      const mapped = safeAnalyzerError(error, 'Unable to load creator discovery');
+      return res.status(mapped.status).json(mapped.body);
+    }
+  }
+
+  async function bridgeCreatorDiscovery(req, res) {
+    try {
+      if (!isPlainObject(req.body) || Object.keys(req.body).length) throw invalidDeepRequest('bridge accepts an empty body');
+      const creatorRef = requireUuid(req.params.creatorRef, 'creator_ref');
+      const scan = await analyzer.getCreatorDiscovery();
+      const candidate = (scan?.candidates || []).find(row => row?.creator_id === creatorRef);
+      if (!candidate) return res.status(404).json({ error: 'Creator not found', code: 'creator_not_found' });
+      if (String(candidate.platform || '').toLowerCase() !== 'tiktok') return res.status(400).json({ error: 'TikTok creator required', code: 'platform_required' });
+      if (candidate.candidate_tier !== 'discovery_only' || candidate.eligibility?.classification !== 'ELIGIBLE_INFLUENCER') {
+        return res.status(409).json({ error: 'Creator is not eligible for analysis', code: 'creator_not_eligible' });
+      }
+      const username = String(candidate.username || '').trim().replace(/^@/, '').toLowerCase();
+      if (!username) return res.status(422).json({ error: 'Creator identity is incomplete', code: 'creator_identity_missing' });
+      if (/\s/u.test(username)) return res.status(422).json({ error: 'Creator identity is invalid', code: 'creator_identity_invalid' });
+      const workspaceId = req.workspace.id;
+      const identity = await db.queryOne(
+        'SELECT * FROM kol_database WHERE workspace_id = ? AND LOWER(TRIM(platform)) = ? AND LOWER(TRIM(REPLACE(username, ?, ?))) = ? ORDER BY id LIMIT 1',
+        [workspaceId, 'tiktok', '@', '', username]
+      );
+      let kol = identity;
+      if (!kol) {
+        const kolId = `discovery-${crypto.createHash('sha256').update(`${workspaceId}:tiktok:${username}`).digest('hex').slice(0, 40)}`;
+        try {
+          await db.exec(
+            `INSERT INTO kol_database
+             (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, bio, scrape_status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete')`,
+            [kolId, workspaceId, 'tiktok', username, candidate.display_name || username, candidate.avatar_url || '', candidate.profile_url || `https://www.tiktok.com/@${username}`, numericOrNull(candidate.followers) ?? 0, candidate.bio || '']
+          );
+          kol = { id: kolId, workspace_id: workspaceId, platform: 'tiktok', username };
+        } catch (insertError) {
+          // A concurrent request may have won the deterministic primary-key insert.
+          kol = await db.queryOne(
+            'SELECT * FROM kol_database WHERE id = ? AND workspace_id = ?',
+            [kolId, workspaceId]
+          );
+          if (!kol) throw insertError;
+        }
+      }
+      const meta = await getSaivareeMeta(db, workspaceId, kol.id);
+      if (meta && (meta.clinic_status === 'contacted' || meta.clinic_status === 'worked_with' || meta.clinic_status === 'not_selected' || (numericOrNull(meta.clinic_rating) !== null && numericOrNull(meta.clinic_rating) <= 2))) {
+        return res.status(409).json({ error: 'Creator is blocked by clinic status', code: 'creator_not_eligible' });
+      }
+      if (!meta || meta.saivaree_creator_id !== creatorRef) {
+        await upsertSaivareeMeta(db, workspaceId, kol.id, { platform: 'tiktok', username, saivaree_creator_id: creatorRef });
+      }
+      return res.json({ kol_id: kol.id });
+    } catch (error) {
+      if (error?.code === 'invalid_deep_analysis_request') return res.status(400).json({ error: error.message, code: error.code });
+      if (error?.code === 'analyzer_unavailable') return res.status(503).json({ error: 'Analyzer unavailable', code: 'analyzer_unavailable' });
+      return res.status(500).json({ error: 'Unable to prepare creator analysis' });
+    }
+  }
+
+  async function createDeepAnalysisPlan(req, res) {
+    try {
+      const body = validatePlanBody(req.body);
+      const result = await analyzer.createDeepAnalysisPlan(body);
+      return res.json(result);
+    } catch (error) {
+      if (error?.code === 'invalid_deep_analysis_request') return res.status(400).json({ error: error.message, code: error.code });
+      const mapped = safeAnalyzerError(error, 'Unable to create deep analysis plan');
+      return res.status(mapped.status).json(mapped.body);
+    }
+  }
+
+  async function executeDeepAnalysis(req, res) {
+    try {
+      const body = validateExecuteBody(req.body);
+      const result = await analyzer.executeDeepAnalysis(body);
+      return res.status(202).json(result);
+    } catch (error) {
+      if (error?.code === 'invalid_deep_analysis_request') return res.status(400).json({ error: error.message, code: error.code });
+      const mapped = safeAnalyzerError(error, 'Unable to execute deep analysis');
+      return res.status(mapped.status).json(mapped.body);
+    }
+  }
+
+  async function getDeepAnalysisJob(req, res) {
+    try {
+      const runId = requireBoundedId(req.params.runId, 'run_id');
+      return res.json(await analyzer.getDeepAnalysisJob(runId));
+    } catch (error) {
+      if (error?.code === 'invalid_deep_analysis_request') return res.status(400).json({ error: error.message, code: error.code });
+      const mapped = safeAnalyzerError(error, 'Unable to load deep analysis job');
+      return res.status(mapped.status).json(mapped.body);
+    }
+  }
+
+  async function getDeepAnalysisCreator(req, res) {
+    try {
+      const creatorRef = requireUuid(req.params.creatorRef, 'creator_ref');
+      return res.json(await analyzer.getDeepAnalysisCreator(creatorRef));
+    } catch (error) {
+      if (error?.code === 'invalid_deep_analysis_request') return res.status(400).json({ error: error.message, code: error.code });
+      const mapped = safeAnalyzerError(error, 'Unable to load deep analysis creator');
+      return res.status(mapped.status).json(mapped.body);
     }
   }
 
@@ -744,6 +923,12 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     analyze,
     getContactRecommendations,
     refreshContactRecommendations,
+    getCreatorDiscovery,
+    bridgeCreatorDiscovery,
+    createDeepAnalysisPlan,
+    executeDeepAnalysis,
+    getDeepAnalysisJob,
+    getDeepAnalysisCreator,
     prepareOutreach,
     compare,
   };
@@ -798,6 +983,36 @@ function registerSaivareeIntelligenceRoutes(app, {
     `${basePath}/api/saivaree/compare`,
     rbac.requirePermission('kol.read'),
     handlers.compare
+  );
+  app.get(
+    `${basePath}/api/saivaree/creator-discovery`,
+    rbac.requirePermission('kol.read'),
+    handlers.getCreatorDiscovery
+  );
+  app.post(
+    `${basePath}/api/saivaree/creator-discovery/:creatorRef/kol`,
+    rbac.requirePermission('kol.update'),
+    handlers.bridgeCreatorDiscovery
+  );
+  app.post(
+    `${basePath}/api/saivaree/deep-analysis/plan`,
+    rbac.requirePermission('kol.read'),
+    handlers.createDeepAnalysisPlan
+  );
+  app.post(
+    `${basePath}/api/saivaree/deep-analysis/execute`,
+    rbac.requirePermission('kol.update'),
+    handlers.executeDeepAnalysis
+  );
+  app.get(
+    `${basePath}/api/saivaree/deep-analysis/jobs/:runId`,
+    rbac.requirePermission('kol.read'),
+    handlers.getDeepAnalysisJob
+  );
+  app.get(
+    `${basePath}/api/saivaree/deep-analysis/creators/:creatorRef`,
+    rbac.requirePermission('kol.read'),
+    handlers.getDeepAnalysisCreator
   );
 
   const adminOnly = platformAdmin || ((req, res, next) => {
@@ -855,6 +1070,11 @@ function createConfiguredAnalyzer() {
     analyze: unavailable,
     getPromisingStars: unavailable,
     refreshPromisingStars: unavailable,
+    getCreatorDiscovery: unavailable,
+    createDeepAnalysisPlan: unavailable,
+    executeDeepAnalysis: unavailable,
+    getDeepAnalysisJob: unavailable,
+    getDeepAnalysisCreator: unavailable,
     getSettings: unavailable,
     updateSettings: unavailable,
     testSettings: unavailable,
