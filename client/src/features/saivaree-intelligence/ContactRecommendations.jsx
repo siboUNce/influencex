@@ -13,6 +13,8 @@ const BUCKETS = ['promising', 'watch', 'need_more_data', 'already_contacted', 's
 const CANDIDATE_TIERS = ['decision_grade', 'deep_analyzed', 'discovery_only'];
 const DEEP_STATES = ['queued', 'running', 'deep_analyzed', 'decision_grade', 'failed', 'skipped_budget'];
 const creatorKey = row => row.creator_id || row.kol_id || rowId(row);
+const buriramRelevance = row => ['strong', 'related'].includes(row.buriram_relevance) ? row.buriram_relevance : 'none';
+const buriramSignals = row => Array.isArray(row.buriram_signals) ? row.buriram_signals.slice(0, 2) : [];
 
 function candidateTier(row) {
   if (CANDIDATE_TIERS.includes(row.candidate_tier)) return row.candidate_tier;
@@ -49,6 +51,7 @@ export default function ContactRecommendations({
   const [pollEpoch, setPollEpoch] = useState(0);
   const [pollStopped, setPollStopped] = useState(false);
   const [rowActions, setRowActions] = useState({});
+  const [buriramOnly, setBuriramOnly] = useState(false);
   const mounted = useRef(false);
   const submitting = useRef(new Set());
   const pending = useRef(new Set());
@@ -131,12 +134,13 @@ export default function ContactRecommendations({
 
   const summary = data?.summary || {};
   const creators = data?.creators || [];
+  const visibleCreators = buriramOnly ? creators.filter(row => ['strong', 'related'].includes(row.buriram_relevance)) : creators;
   const sections = [
-    { id: 'top', rows: creators.filter(row => ['decision_grade', 'deep_analyzed'].includes(row.candidate_tier)) },
-    { id: 'promising', rows: creators.filter(row => row.candidate_tier === 'discovery_only') },
+    { id: 'top', rows: visibleCreators.filter(row => ['decision_grade', 'deep_analyzed'].includes(row.candidate_tier)) },
+    { id: 'promising', rows: visibleCreators.filter(row => row.candidate_tier === 'discovery_only') },
   ];
-  const legacyRows = creators.filter(row => !CANDIDATE_TIERS.includes(row.candidate_tier));
-  if (legacyRows.length) sections.push({ id: 'other', rows: legacyRows });
+  const legacyRows = visibleCreators.filter(row => !CANDIDATE_TIERS.includes(row.candidate_tier));
+  if (creators.some(row => !CANDIDATE_TIERS.includes(row.candidate_tier))) sections.push({ id: 'other', rows: legacyRows });
   const promisingRanks = new Map(creators.filter(row => row.bucket === 'promising').map((row, index) => [rowId(row), index + 1]));
 
   return (
@@ -159,6 +163,10 @@ export default function ContactRecommendations({
         <button type="button" className="btn btn-secondary" onClick={() => setPollEpoch(epoch => epoch + 1)} disabled={loading}>
           {t('kol_db.discovery_reload')}
         </button>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 12, fontSize: 13 }}>
+          <input type="checkbox" checked={buriramOnly} onChange={event => setBuriramOnly(event.target.checked)} />
+          {t('kol_db.discovery_buriram_only')}
+        </label>
         <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('kol_db.discovery_analysis_cost')}</p>
         <div role="status" style={{ margin: '10px 0', fontSize: 13 }}>
           {t('kol_db.contact_rec_scan_status', { status: t(`kol_db.contact_rec_scan_${
@@ -195,7 +203,7 @@ export default function ContactRecommendations({
             {sections.map(section => <section key={section.id} aria-labelledby={`discovery-${section.id}`} style={{ marginTop: 20 }}>
               <h4 id={`discovery-${section.id}`} style={{ marginBottom: 4 }}>{t(`kol_db.discovery_section_${section.id}`)} ({section.rows.length})</h4>
               <p style={{ marginTop: 0, fontSize: 12, color: 'var(--text-muted)' }}>{t(`kol_db.discovery_section_${section.id}_body`)}</p>
-              {section.rows.length === 0 ? <p>{t(`kol_db.discovery_section_${section.id}_empty`)}</p> : (
+              {section.rows.length === 0 ? <p>{t(buriramOnly ? 'kol_db.buriram_filter_empty' : `kol_db.discovery_section_${section.id}_empty`)}</p> : (
               <div className="table-container">
                 <table>
                   <thead>
@@ -242,9 +250,19 @@ export default function ContactRecommendations({
                             </div>}
                             {row.reason_codes?.[0] && (
                               <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
-                                {t(`kol_db.contact_rec_reason_${row.reason_codes[0]}`)}
+                                {t('kol_db.contact_rec_reason_' + row.reason_codes[0])}
                               </div>
                             )}
+                            <div style={{ marginTop: 4 }}>
+                              <span className={'badge ' + (buriramRelevance(row) === 'strong' ? 'badge-green' : buriramRelevance(row) === 'related' ? 'badge-orange' : '')}>
+                                {t('kol_db.buriram_relevance_' + buriramRelevance(row))}
+                              </span>
+                              {buriramSignals(row).map((signal, index) => (
+                                <div key={(signal.code || 'signal') + '-' + index} style={{ marginTop: 2, fontSize: 11, color: 'var(--text-muted)' }}>
+                                  {t('kol_db.buriram_signal_' + signal.code)}{signal.snippet ? ' (' + signal.snippet + ')' : ''}
+                                </div>
+                              ))}
+                            </div>
                           </td>
                           <td>
                             <div>{sampleSize == null ? '-' : t('kol_db.contact_rec_sample', { count: sampleSize })}</div>

@@ -36,6 +36,9 @@ function row(overrides = {}) {
     clinic_rating: 4,
     bucket: 'promising',
     contactable: true,
+    buriram_relevance: 'none',
+    buriram_score: 0,
+    buriram_signals: [],
     reason_codes: ['promising_ranked_by_creator_intelligence'],
     analysis_status: 'available',
     observed_metrics: {
@@ -183,6 +186,7 @@ it('renders tier badges and ranks a 50-row shortlist without starting paid actio
   renderPanel();
   await screen.findByText('@creator-1');
 
+  expect(screen.getByRole('checkbox', { name: 'Buriram only' })).not.toBeChecked();
   expect(screen.getAllByText('Decision Grade')).toHaveLength(4);
   expect(screen.getAllByText('Deep Analyzed')).toHaveLength(2);
   expect(screen.getAllByText('Discovery Only')).toHaveLength(44);
@@ -190,6 +194,7 @@ it('renders tier badges and ranks a 50-row shortlist without starting paid actio
   expect(screen.getByText('#1')).toBeInTheDocument();
   expect(screen.getByText('#50')).toBeInTheDocument();
   expect(screen.getAllByRole('button', { name: 'Open' })).toHaveLength(50);
+  expect(screen.getByRole('checkbox', { name: 'Buriram only' })).not.toBeChecked();
   expect(screen.queryByRole('button', { name: /Prepare outreach/i })).not.toBeInTheDocument();
   expect(api.prepareSaivareeOutreach).not.toHaveBeenCalled();
   expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
@@ -326,4 +331,97 @@ it('keeps other discovery rows actionable while one row is submitting', async ()
   fireEvent.click(buttons[0]);
   expect(buttons[0]).toBeDisabled();
   expect(buttons[1]).toBeEnabled();
+});
+
+
+it('shows Buriram signal badges and evidence without inferring residence', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([
+    row({ username: 'strong', buriram_relevance: 'strong', buriram_score: 135, buriram_signals: [
+      { code: 'BURIRAM_USERNAME', source: 'username', snippet: 'buriram.creator' },
+      { code: 'BURIRAM_HASHTAG', source: 'hashtag', snippet: '#buriram' },
+      { code: 'BURIRAM_CAPTION', source: 'caption', snippet: 'third signal is not shown' },
+    ] }),
+    row({ kol_id: 'kol-2', username: 'related', buriram_relevance: 'related', buriram_signals: [
+      { code: 'BURIRAM_DISCOVERY_QUERY', source: 'discovery_query', snippet: 'Buriram beauty creators' },
+    ] }),
+    row({ kol_id: 'kol-3', username: 'none', buriram_relevance: 'none' }),
+  ]));
+  renderPanel();
+  await screen.findByText('@strong');
+
+  expect(screen.getByText('Buriram Strong')).toBeInTheDocument();
+  expect(screen.getByText('Buriram Related')).toBeInTheDocument();
+  expect(screen.getByText('No Buriram Signal')).toBeInTheDocument();
+  expect(screen.getByText('Username signal (buriram.creator)')).toBeInTheDocument();
+  expect(screen.getByText('Hashtag signal (#buriram)')).toBeInTheDocument();
+  expect(screen.queryByText('third signal is not shown')).not.toBeInTheDocument();
+  expect(screen.getByText('Discovery query signal (Buriram beauty creators)')).toBeInTheDocument();
+  expect(screen.queryByText(/lives in|resident/i)).not.toBeInTheDocument();
+});
+
+it('filters every discovery section to Buriram strong or related rows while keeping related discovery analysis available', async () => {
+  const user = userEvent.setup();
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([
+    row({ username: 'top-strong', candidate_tier: 'decision_grade', buriram_relevance: 'strong' }),
+    row({ kol_id: 'kol-2', username: 'top-none', candidate_tier: 'deep_analyzed', buriram_relevance: 'none' }),
+    discovery({ kol_id: 'kol-3', username: 'discovery-related', buriram_relevance: 'related', buriram_signals: [{ code: 'BURIRAM_CAPTION', source: 'caption', snippet: 'Buriram' }] }),
+    discovery({ kol_id: 'kol-4', username: 'discovery-none', buriram_relevance: 'none' }),
+    row({ kol_id: 'kol-5', username: 'legacy-none', candidate_tier: null, buriram_relevance: 'none' }),
+  ]));
+  renderPanel();
+  await screen.findByText('@top-strong');
+
+  const filter = screen.getByRole('checkbox', { name: 'Buriram only' });
+  expect(filter).not.toBeChecked();
+  expect(screen.getByText('@top-none')).toBeInTheDocument();
+  expect(screen.getByText('@discovery-none')).toBeInTheDocument();
+
+  await user.click(filter);
+  const top = screen.getByRole('region', { name: 'Top Picks (1)' });
+  expect(within(top).getByText('@top-strong')).toBeInTheDocument();
+  expect(within(top).queryByText('@top-none')).not.toBeInTheDocument();
+  const promising = screen.getByRole('region', { name: 'Promising Creators (1)' });
+  expect(within(promising).getByText('@discovery-related')).toBeInTheDocument();
+  expect(within(promising).getByRole('button', { name: 'Deep Analyze' })).toBeEnabled();
+  const other = screen.getByRole('region', { name: 'Other Creators (0)' });
+  expect(within(other).getByText('No creators with Buriram evidence in this section.')).toBeInTheDocument();
+  expect(screen.queryByText('@top-none')).not.toBeInTheDocument();
+  expect(screen.queryByText('@discovery-none')).not.toBeInTheDocument();
+  expect(screen.queryByText('@legacy-none')).not.toBeInTheDocument();
+  expect(within(promising).getByText('#3')).toBeInTheDocument();
+  await user.click(filter);
+  expect(screen.getByText('@top-none')).toBeInTheDocument();
+  expect(screen.getByText('@discovery-none')).toBeInTheDocument();
+  expect(screen.getAllByRole('button', { name: 'Open' })).toHaveLength(5);
+});
+
+it('keeps both sections with Buriram-specific empty messages', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([
+    row({ candidate_tier: 'decision_grade' }),
+    discovery({ kol_id: 'kol-2', username: 'none-discovery' }),
+  ]));
+  renderPanel();
+  await screen.findByText('@creator.one');
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Buriram only' }));
+  for (const name of ['Top Picks (0)', 'Promising Creators (0)']) {
+    expect(within(screen.getByRole('region', { name })).getByText('No creators with Buriram evidence in this section.')).toBeInTheDocument();
+  }
+});
+
+it('deep analyzes a related discovery-only creator while the Buriram filter is enabled', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([
+    discovery({ kol_id: null, buriram_relevance: 'related', buriram_score: 20,
+      buriram_signals: [{ code: 'BURIRAM_DISCOVERY_QUERY', source: 'discovery_query', snippet: 'Buriram creators' }] }),
+  ]));
+  api.ensureSaivareeDiscoveryKol.mockResolvedValue({ kol_id: 'saved-related-kol' });
+  api.analyzeSaivareeKol.mockResolvedValue({ status: 'queued' });
+  renderPanel();
+  await screen.findByText('@creator.one');
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Buriram only' }));
+  fireEvent.click(within(screen.getByRole('region', { name: 'Promising Creators (1)' })).getByRole('button', { name: 'Deep Analyze' }));
+  await screen.findByText('Analysis requested. Waiting for updated results.');
+  expect(api.ensureSaivareeDiscoveryKol).toHaveBeenCalledExactlyOnceWith(row().creator_id);
+  expect(api.analyzeSaivareeKol).toHaveBeenCalledExactlyOnceWith('saved-related-kol');
+  expect(screen.getByRole('checkbox', { name: 'Buriram only' })).toBeChecked();
+  expect(screen.getByText('Buriram Related')).toBeInTheDocument();
 });

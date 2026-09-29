@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { classifyBuriramRelevance } = require('./buriram-relevance');
 const { createAnalyzerClient } = require('./analyzer-client');
 const { renderPersonalizedEmail } = require('../agents-v2/kol-outreach');
 
@@ -582,6 +583,7 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
           evidence_quality: candidate.evidence_quality || {},
           eligibility: candidate.eligibility,
           discovery_provenance: candidate.discovery_provenance,
+          ...classifyBuriramRelevance(candidate),
         };
       });
       creators.sort(compareContactRecommendations);
