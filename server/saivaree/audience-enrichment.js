@@ -83,6 +83,13 @@ function fresh(data, now = Date.now()) {
   if (b.direct_profile_local_count > b.unique_authors || b.profile_bio_local_count > b.unique_authors) return null;
   if (!c.category_counts || ['price','booking','location','service_interest'].some(k => !Number.isInteger(c.category_counts[k]) || c.category_counts[k] < 0 || c.category_counts[k] > c.intent_comment_count)) return null;
   if (!Array.isArray(b.reason_codes) || !Array.isArray(c.reason_codes) || !Array.isArray(data.evidence_lines) || data.evidence_lines.length > 2 || data.evidence_lines.some(v => typeof v !== 'string' || v.length > 300)) return null;
+  if (data.coverage !== undefined) {
+    const x = data.coverage;
+    if (!x || !['complete', 'partial'].includes(x.status) || !Number.isInteger(x.requested_posts) || x.requested_posts < 0 || x.requested_posts > 3
+      || x.posts_sampled !== b.posts_sampled || x.posts_sampled > x.requested_posts || !Number.isInteger(x.failed_post_count)
+      || x.failed_post_count < 0 || x.failed_post_count > x.requested_posts || x.posts_sampled + x.failed_post_count > x.requested_posts) return null;
+    if (x.status === 'partial' && (x.posts_sampled < 1 || b.sample_count < 1)) return null;
+  }
   return data;
 }
 async function loadCache(db, workspaceId, rows, now = Date.now()) {
@@ -156,12 +163,22 @@ function createAudienceEnrichment({ db, getRows, apify, quota, harvest, cache, n
       const h = urls.length ? await harvest({ videoUrls: urls, limitPerVideo: 30, workspaceId, strict: true }) : { success: true, comments: [], runs: [] };
       if (!h.success) fail(h.code === 'quota_exceeded' ? 429 : 502, h.code || 'audience_comment_provider_failed');
       const bounded = [];
-      for (const url of urls) bounded.push(...(Array.isArray(h.comments) ? h.comments : []).filter(c => c?.source_url === url).slice(0, 30));
-      const b = analyzeAudienceEvidence(bounded, urls.length), c = aggregateCommercialIntent(bounded);
+      for (const url of urls) bounded.push(...(Array.isArray(h.comments) ? h.comments : []).filter(c => c?.source_url === url && [c.body, c.public_author_locality, c.public_author_bio].some(value => typeof value === 'string' && value.trim())).slice(0, 30));
+      const postsSampled = new Set(bounded.map(c => c.source_url)).size;
+      if (h.partial && !postsSampled) fail(502, 'audience_comment_provider_failed');
+      const coverage = { status: h.partial ? 'partial' : 'complete', requested_posts: urls.length, posts_sampled: postsSampled,
+        failed_post_count: (h.runs || []).filter(run => run.success === false).length };
+      const b = analyzeAudienceEvidence(bounded, postsSampled), c = aggregateCommercialIntent(bounded);
+      if (h.partial) {
+        for (const aggregate of [b, c]) {
+          if (aggregate.confidence === 'high') aggregate.confidence = 'medium';
+          aggregate.reason_codes.push('partial_post_coverage');
+        }
+      }
       const data = { version: 1, analyzed_at: new Date(now()).toISOString(), expires_at: new Date(now() + TTL_MS).toISOString(),
-        buriram_audience: b, commercial_intent: c, evidence_lines: [
+        coverage, buriram_audience: b, commercial_intent: c, evidence_lines: [
           'Public locality: ' + b.direct_profile_local_count + '; public bio: ' + b.profile_bio_local_count + '; contextual mentions: ' + b.contextual_local_mentions,
-          'Aggregate intent comments: ' + c.intent_comment_count + ' of ' + c.sample_count,
+          'Aggregate intent comments: ' + c.intent_comment_count + ' of ' + c.sample_count + (h.partial ? '; partial coverage: ' + postsSampled + '/' + urls.length + ' posts; provider stopped after failure' : ''),
         ] };
       await cache.put(db, PLATFORM, cacheKey(workspaceId, row), data, 'audience_enrichment');
       return { audience_enrichment: data, cached: false, provider_runs: [...runs, ...(h.runs || []).slice(0,3)].map(r => ({ actor_id: r.actor_id, run_id: r.run_id || null, success: r.success === true })), request_id: body.request_id };

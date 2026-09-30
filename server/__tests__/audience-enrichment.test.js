@@ -25,7 +25,7 @@ const harness = (rows, opts = {}) => {
       { webVideoUrl: 'https://www.tiktok.com/@creator_one/video/3' },
       { webVideoUrl: 'https://www.tiktok.com/@creator_one/video/4' },
     ] }; } },
-    harvest: async ({ videoUrls, limitPerVideo }) => { calls.harvest++; assert.ok(videoUrls.length <= 3); assert.equal(limitPerVideo, 30); return { success: true, comments: videoUrls.flatMap(u => Array.from({ length: 40 }, (_, i) => comment({ source_url: u, author_handle: '@person' + i, body: 'RAW_COMMENT_SENTINEL ราคาเท่าไหร่', public_author_locality: 'Buriram' }))), runs: [{ actor_id: 'comments', run_id: 'comments-run', success: true }] }; },
+    harvest: async ({ videoUrls, limitPerVideo, ...rest }) => { calls.harvest++; assert.ok(videoUrls.length <= 3); assert.equal(limitPerVideo, 30); if (opts.harvest) return opts.harvest({ videoUrls, limitPerVideo, ...rest }); if (opts.harvestResult) return opts.harvestResult; return { success: true, comments: videoUrls.flatMap(u => Array.from({ length: 40 }, (_, i) => comment({ source_url: u, author_handle: '@person' + i, body: 'RAW_COMMENT_SENTINEL ราคาเท่าไหร่', public_author_locality: 'Buriram' }))), runs: [{ actor_id: 'comments', run_id: 'comments-run', success: true }] }; },
     cache: { put: async (...args) => { calls.cachedWrites.push(args[3]); } }, now: () => 1700000000000, tokenKey: Buffer.alloc(32, 7),
   });
   return { service, calls };
@@ -143,4 +143,50 @@ test('plan and execute strictly reject unknown and missing request fields', asyn
   await err(service.execute('ws-a', { ...valid, unknown: true }), 400);
   await err(service.execute('ws-a', { creator_ref: REF, plan_token: valid.plan_token, unknown: true }), 400);
   assert.equal(calls.apify, 0); assert.equal(calls.harvest, 0);
+});
+
+test('partial harvest caches aggregate evidence with actual post coverage and reduced confidence', async () => {
+  const urls = [1, 2].map(i => 'https://www.tiktok.com/@creator_one/video/' + i);
+  const harvestResult = { success: true, partial: true, posts_sampled: 2, successful_post_count: 2, failed_post_count: 1,
+    comments: urls.flatMap(source_url => Array.from({ length: 30 }, (_, i) => comment({ source_url,
+      author_handle: '@person' + i, body: 'RAW_COMMENT_SENTINEL ราคาเท่าไหร่', public_author_locality: 'Buriram' }))),
+    runs: [
+      { actor_id: 'comments', run_id: 'success-1', success: true },
+      { actor_id: 'comments', run_id: 'success-2', success: true },
+      { actor_id: 'comments', run_id: 'failed-3', success: false },
+    ] };
+  const { service, calls } = harness([row()], { harvest: async ({ videoUrls, strict }) => {
+    assert.deepEqual(videoUrls, [...urls, 'https://www.tiktok.com/@creator_one/video/3']);
+    assert.equal(strict, true);
+    return harvestResult;
+  } });
+  const plan = await service.plan('ws-a', { creator_ref: REF });
+  const result = await service.execute('ws-a', { creator_ref: REF, plan_token: plan.plan_token, request_id: 'partial' });
+  assert.equal(result.cached, false);
+  assert.equal(calls.apify, 1);
+  assert.equal(calls.harvest, 1);
+  assert.deepEqual(result.audience_enrichment.coverage, { status: 'partial', requested_posts: 3, posts_sampled: 2, failed_post_count: 1 });
+  assert.equal(result.audience_enrichment.buriram_audience.posts_sampled, 2);
+  assert.equal(result.provider_runs.length, 4);
+  assert.equal(result.provider_runs[3].success, false);
+  assert.equal(result.provider_runs[3].run_id, 'failed-3');
+  assert.equal(calls.cachedWrites.length, 1);
+  assert.deepEqual(calls.cachedWrites[0], result.audience_enrichment);
+  assert.doesNotMatch(JSON.stringify(calls.cachedWrites[0]), /"comments"\s*:|RAW_COMMENT_SENTINEL/);
+  for (const aggregate of [result.audience_enrichment.buriram_audience, result.audience_enrichment.commercial_intent]) {
+    assert.equal(aggregate.sample_count, 60);
+    assert.ok(aggregate.reason_codes.includes('partial_post_coverage'));
+    assert.equal(aggregate.confidence, 'medium');
+  }
+});
+
+test('zero usable evidence after provider failure rejects without a cache write', async () => {
+  const { service, calls } = harness([row()], { harvestResult: { success: false, code: 'comment_provider_failed',
+    comments: [], runs: [{ actor_id: 'comments', run_id: 'failed-1', success: false }] } });
+  const plan = await service.plan('ws-a', { creator_ref: REF });
+  await assert.rejects(service.execute('ws-a', { creator_ref: REF, plan_token: plan.plan_token, request_id: 'failed' }),
+    e => e.status === 502 && e.code === 'comment_provider_failed');
+  assert.equal(calls.apify, 1);
+  assert.equal(calls.harvest, 1);
+  assert.equal(calls.cachedWrites.length, 0);
 });

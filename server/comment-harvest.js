@@ -80,6 +80,8 @@ async function harvestTikTokComments({ videoUrls, limitPerVideo = 50, workspaceI
   if (strict) limitPerVideo = Math.min(30, Math.max(1, Number.isInteger(limitPerVideo) ? limitPerVideo : 30));
   const out = [];
   const runs = [];
+  let postsSampled = 0;
+  const coverage = () => ({ posts_sampled: postsSampled, successful_post_count: postsSampled, failed_post_count: runs.filter(run => !run.success).length });
   for (const url of [...new Set(videoUrls)].slice(0, strict ? 3 : 20)) {
     const check = quota.canCall(TT_ACTOR, limitPerVideo, workspaceId);
     if (!check.allowed) {
@@ -94,16 +96,18 @@ async function harvestTikTokComments({ videoUrls, limitPerVideo = 50, workspaceI
     runs.push({ actor_id: TT_ACTOR, run_id: r.runId || null, success: r.success === true });
     if (strict && !r.success) quota.record(TT_ACTOR, 0, workspaceId);
     if (!r.success) {
-      if (strict) return { success: false, code: 'comment_provider_failed', comments: out, runs };
+      if (strict) return { success: postsSampled > 0, partial: postsSampled > 0, code: 'comment_provider_failed', comments: out, runs, ...coverage() };
       continue;
     }
     quota.record(TT_ACTOR, r.items?.length || 0, workspaceId);
+    const before = out.length;
     for (const it of (r.items || []).slice(0, limitPerVideo)) {
       const norm = normalizeTtComment(it, url);
-      if (norm) out.push(norm);
+      if (norm && (!strict || [norm.body, norm.public_author_locality, norm.public_author_bio].some(value => typeof value === 'string' && value.trim()))) out.push(norm);
     }
+    if (out.length > before) postsSampled++;
   }
-  return { success: true, comments: out, runs };
+  return { success: true, comments: out, runs, ...(strict ? { partial: false, ...coverage() } : {}) };
 }
 
 module.exports = {

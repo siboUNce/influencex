@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-function loadModule({ apifyResult, configured = true, calls = [] } = {}) {
+function loadModule({ apifyResult, configured = true, calls = [], apifyResults, records = [] } = {}) {
   delete require.cache[require.resolve('../comment-harvest')];
   delete require.cache[require.resolve('../apify-client')];
   delete require.cache[require.resolve('../apify-quota')];
@@ -10,7 +10,7 @@ function loadModule({ apifyResult, configured = true, calls = [] } = {}) {
       isConfigured: () => configured,
       runActor: async (actor, input, options) => {
         calls.push({ actor, input, options });
-        return apifyResult || { success: true, items: [] };
+        return (apifyResults ? apifyResults[calls.length - 1] : apifyResult) || { success: true, items: [] };
       },
     },
     loaded: true,
@@ -22,7 +22,7 @@ function loadModule({ apifyResult, configured = true, calls = [] } = {}) {
   require.cache[require.resolve('../apify-quota')] = {
     exports: {
       canCall: () => ({ allowed: true, reason: null, runs: 0, items: 0, runLimit: 100, itemsLimit: 1000, runRemaining: 100, itemsRemaining: 1000 }),
-      record: () => ({ runs: 1, items: 0 }),
+      record: (...args) => { records.push(args); return { runs: 1, items: 0 }; },
     },
     loaded: true,
     id: require.resolve('../apify-quota'),
@@ -121,6 +121,50 @@ test('strict TikTok harvest deduplicates URLs and caps calls, inputs and output'
   assert.ok(calls.length <= 3);
   assert.deepEqual(calls.map(call => call.input.postURLs), [['vid1'], ['vid2'], ['vid3']]);
   for (const call of calls) assert.ok(call.input.commentsPerPost <= 30);
+  assert.equal(r.partial, false);
+  assert.equal(r.posts_sampled, 3);
+  assert.equal(r.failed_post_count, 0);
   assert.equal(r.comments.length, 90);
   assert.ok(r.comments.length <= 90);
+});
+
+test('strict TikTok harvest preserves usable partial evidence and stops after failure', async () => {
+  const calls = [], records = [];
+  const items = Array.from({ length: 30 }, (_, i) => ({ cid: String(i), text: 'usable comment', user: { uniqueId: 'u' + i } }));
+  const profileItems = items.map((item, i) => i === 0 ? { ...item, text: '', user: { uniqueId: 'profile-only', city: 'Buriram', signature: 'Public bio' } } : item);
+  const m = loadModule({ calls, records, apifyResults: [
+    { success: true, runId: 'success-1', items },
+    { success: true, runId: 'success-2', items: profileItems },
+    { success: false, runId: 'failed-3', items: [] },
+  ] });
+  const r = await m.harvestTikTokComments({ videoUrls: ['vid1', 'vid2', 'vid3', 'vid4'], strict: true, limitPerVideo: 30 });
+  assert.equal(r.success, true);
+  assert.equal(r.partial, true);
+  assert.equal(r.comments.length, 60);
+  assert.ok(r.comments.some(c => c.body === '' && c.public_author_locality === 'Buriram' && c.public_author_bio === 'Public bio'));
+  assert.equal(r.posts_sampled, 2);
+  assert.equal(r.successful_post_count, 2);
+  assert.equal(r.failed_post_count, 1);
+  assert.equal(r.runs.length, 3);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map(call => call.input.postURLs), [['vid1'], ['vid2'], ['vid3']]);
+  assert.equal(r.runs[2].success, false);
+  assert.equal(r.runs[2].run_id, 'failed-3');
+  assert.equal(records.length, 3);
+  assert.equal(records[2][1], 0);
+});
+
+test('strict TikTok harvest stops immediately when the first provider call fails', async () => {
+  const calls = [];
+  const m = loadModule({ calls, apifyResults: [{ success: false, runId: 'failed-1' }] });
+  const r = await m.harvestTikTokComments({ videoUrls: ['vid1', 'vid2', 'vid3'], strict: true, limitPerVideo: 30 });
+  assert.equal(r.success, false);
+  assert.equal(r.comments.length, 0);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].input.postURLs, ['vid1']);
+  assert.equal(r.runs.length, 1);
+  assert.equal(r.runs[0].success, false);
+  assert.equal(r.runs[0].run_id, 'failed-1');
+  assert.ok(!r.partial);
+  if (r.posts_sampled !== undefined) assert.equal(r.posts_sampled, 0);
 });
