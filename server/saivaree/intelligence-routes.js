@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { cheapScreen } = require('./cheap-screen');
 const { classifyBuriramRelevance } = require('./buriram-relevance');
 const { createAnalyzerClient } = require('./analyzer-client');
 const { renderPersonalizedEmail } = require('../agents-v2/kol-outreach');
@@ -596,6 +597,7 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
         if (row.bucket === 'promising') row.rank = ++rank;
       }
       creators.sort(compareContactRecommendations);
+      for (const row of creators) row.cheap_screen = cheapScreen(row);
 
       const summary = {
         promising: 0,

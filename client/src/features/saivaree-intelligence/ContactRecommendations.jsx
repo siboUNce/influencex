@@ -248,6 +248,12 @@ export default function ContactRecommendations({
                             {DEEP_STATES.includes(state) && !CANDIDATE_TIERS.includes(state) && <div style={{ marginTop: 4 }}>
                               <span className={`badge ${state === 'failed' ? 'badge-red' : 'badge-orange'}`}>{t(`kol_db.deep_state_${state}`)}</span>
                             </div>}
+                            {['shortlisted', 'watch', 'excluded', 'insufficient_data'].includes(row.cheap_screen?.status) && <div style={{ marginTop: 4 }}>
+                              <span className="badge">{t('kol_db.cheap_screen_label')}: {t('kol_db.cheap_screen_' + row.cheap_screen.status)}</span>
+                              {(row.cheap_screen.reason_codes || []).slice(0, 2).map(code => <div key={code} style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                {t('kol_db.cheap_screen_reason_' + code)}
+                              </div>)}
+                            </div>}
                             {row.reason_codes?.[0] && (
                               <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
                                 {t('kol_db.contact_rec_reason_' + row.reason_codes[0])}

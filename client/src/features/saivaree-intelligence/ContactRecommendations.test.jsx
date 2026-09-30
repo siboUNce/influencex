@@ -425,3 +425,39 @@ it('deep analyzes a related discovery-only creator while the Buriram filter is e
   expect(screen.getByRole('checkbox', { name: 'Buriram only' })).toBeChecked();
   expect(screen.getByText('Buriram Related')).toBeInTheDocument();
 });
+
+
+it('renders cached Cheap Screen reasons and keeps filter/reload free of paid work', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([
+    discovery({ cheap_screen: { status: 'shortlisted', reason_codes: ['cached_reach_consistent', 'multiple_cached_samples', 'limited_cached_evidence'] }, buriram_relevance: 'related' }),
+    row({ kol_id: 'kol-2', username: 'missing', cheap_screen: { status: 'insufficient_data', reason_codes: ['insufficient_cached_evidence'] } }),
+  ]));
+  renderPanel();
+  expect(await screen.findByText('Cheap Screen: Shortlisted')).toBeInTheDocument();
+  expect(screen.getByText('Consistent cached reach')).toBeInTheDocument();
+  expect(screen.getByText('Multiple cached samples')).toBeInTheDocument();
+  expect(screen.queryByText('Limited cached evidence')).not.toBeInTheDocument();
+  expect(screen.getByText('Cheap Screen: Insufficient data')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Buriram only' }));
+  expect(screen.queryByText('@missing')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Reload cached results' }));
+  await act(async () => {});
+  expect(api.getSaivareeCreatorDiscovery).toHaveBeenCalledTimes(2);
+  for (const action of [api.analyzeSaivareeKol, api.ensureSaivareeDiscoveryKol, api.refreshSaivareeContactRecommendations, api.planSaivareeDeepAnalysis, api.executeSaivareeDeepAnalysis]) expect(action).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Clinic Potential|audience percentage|commercial intent/i)).not.toBeInTheDocument();
+});
+
+it('Cheap Screen watch remains compatible with existing explicit Deep Analyze', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([discovery({ cheap_screen: { status: 'watch', reason_codes: ['viral_dependency_high', 'consistency_weak'] } })]));
+  api.analyzeSaivareeKol.mockResolvedValue({ status: 'queued' });
+  renderPanel();
+  expect(await screen.findByText('Cheap Screen: Watch')).toBeInTheDocument();
+  expect(screen.getByText('Relies on viral hits')).toBeInTheDocument();
+  expect(screen.getByText('Uneven views')).toBeInTheDocument();
+  expect(api.analyzeSaivareeKol).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Deep Analyze' }));
+  await screen.findByText('Analysis requested. Waiting for updated results.');
+  expect(api.analyzeSaivareeKol).toHaveBeenCalledExactlyOnceWith('kol-1');
+  expect(api.ensureSaivareeDiscoveryKol).not.toHaveBeenCalled();
+  expect(api.refreshSaivareeContactRecommendations).not.toHaveBeenCalled();
+});

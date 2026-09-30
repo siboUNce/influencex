@@ -1498,3 +1498,26 @@ test('creator discovery falls back only on 404 to the legacy cached GET without 
       : ['http://analyzer.test/internal/influencex/creator-discovery']);
   }
 });
+
+
+test('cheap screen maps cached discovery on repeated GET without paid dependencies or reordering', async () => {
+  const candidates = [
+    scanCandidate(1, { candidate_tier: 'decision_grade', selection_rank: 8, observed_metrics: { median_views: 5000, view_consistency: 75, viral_dependency: 0.2, sample_size: 20 } }),
+    scanCandidate(2, { candidate_tier: 'discovery_only', selection_rank: 1, eligibility: { eligible: true } }),
+    scanCandidate(3, { candidate_tier: 'deep_analyzed', selection_rank: 2, observed_metrics: { median_views: 5000, view_consistency: 75, viral_dependency: 0.2, sample_size: 20 } }),
+  ];
+  const harness = scanHarness(candidates, [{ id: 'local-3', platform: 'tiktok', username: 'creator-3', clinic_status: 'contacted' }]);
+  harness.analyzer.getCreatorDiscovery = harness.analyzer.getPromisingStars;
+  const first = makeRes();
+  await harness.handlers.getCreatorDiscovery({ workspace: { id: 'ws-scan' } }, first);
+  const reload = makeRes();
+  await harness.handlers.getCreatorDiscovery({ workspace: { id: 'ws-scan' }, query: { buriram_only: 'true' } }, reload);
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(reload.body, first.body);
+  assert.deepEqual(first.body.creators.map(row => row.creator_id), ['creator-1', 'creator-2', 'creator-3']);
+  assert.deepEqual(first.body.creators.map(row => row.selection_rank), [8, 1, 2]);
+  assert.deepEqual(first.body.creators.map(row => row.cheap_screen.status), ['shortlisted', 'insufficient_data', 'excluded']);
+  assert.ok(first.body.creators.every(row => row.cheap_screen.shortlist_rank === null));
+  assert.equal(harness.calls.scan, 2);
+  assert.equal(harness.calls.forbidden, 0);
+});
