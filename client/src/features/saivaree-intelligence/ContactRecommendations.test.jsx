@@ -14,6 +14,8 @@ vi.mock('../../api/client', () => ({
     prepareSaivareeOutreach: vi.fn(),
     analyzeSaivareeKol: vi.fn(),
     ensureSaivareeDiscoveryKol: vi.fn(),
+    planAudienceEnrichment: vi.fn(),
+    executeAudienceEnrichment: vi.fn(),
   },
   setApiTranslator: vi.fn(),
 }));
@@ -89,6 +91,8 @@ beforeEach(() => {
   api.prepareSaivareeOutreach.mockReset();
   api.analyzeSaivareeKol.mockReset();
   api.ensureSaivareeDiscoveryKol.mockReset();
+  api.planAudienceEnrichment.mockReset();
+  api.executeAudienceEnrichment.mockReset();
 });
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -460,4 +464,41 @@ it('Cheap Screen watch remains compatible with existing explicit Deep Analyze', 
   expect(api.analyzeSaivareeKol).toHaveBeenCalledExactlyOnceWith('kol-1');
   expect(api.ensureSaivareeDiscoveryKol).not.toHaveBeenCalled();
   expect(api.refreshSaivareeContactRecommendations).not.toHaveBeenCalled();
+});
+
+it('offers Audience enrichment only to shortlisted TikTok rows', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([
+    discovery({ cheap_screen: { status: 'shortlisted', reason_codes: [] } }),
+    discovery({ kol_id: 'kol-2', username: 'watch', cheap_screen: { status: 'watch', reason_codes: [] } }),
+    discovery({ kol_id: 'kol-3', username: 'youtube', platform: 'youtube', cheap_screen: { status: 'shortlisted', reason_codes: [] } }),
+  ]));
+  renderPanel();
+  await screen.findByText('@creator.one');
+  expect(screen.getAllByRole('button', { name: 'Plan audience analysis' })).toHaveLength(1);
+});
+
+it('plans first and executes exactly once after explicit confirmation', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([discovery({ cheap_screen: { status: 'shortlisted', reason_codes: [] } })]));
+  api.planAudienceEnrichment.mockResolvedValue({ creator_ref: row().creator_id, max_posts: 3, comments_per_post: 30, max_provider_runs: 4, plan_token: 'plan-1' });
+  api.executeAudienceEnrichment.mockResolvedValue({ audience_enrichment: { buriram_audience: { level: 'moderate', confidence: 'medium' }, commercial_intent: { level: 'high', confidence: 'medium', intent_comment_count: 2 }, evidence_lines: ['Profile bio signal'] } });
+  renderPanel();
+  fireEvent.click(await screen.findByRole('button', { name: 'Plan audience analysis' }));
+  expect(api.planAudienceEnrichment).toHaveBeenCalledTimes(1);
+  expect(api.executeAudienceEnrichment).not.toHaveBeenCalled();
+  expect(await screen.findByRole('button', { name: 'Confirm and run' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm and run' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm and run' }));
+  await screen.findByText(/moderate \(medium\)/i);
+  expect(api.executeAudienceEnrichment).toHaveBeenCalledTimes(1);
+});
+
+it('renders cached audience enrichment after discovery reload without planning', async () => {
+  api.getSaivareeCreatorDiscovery.mockResolvedValue(result([discovery({ cheap_screen: { status: 'shortlisted', reason_codes: [] }, audience_enrichment: { buriram_audience: { level: 'strong', confidence: 'high' }, commercial_intent: { level: 'low', confidence: 'low', intent_comment_count: 0 }, evidence_lines: ['Cached profile signal'] } })]));
+  renderPanel();
+  expect(await screen.findByText(/strong \(high\)/i)).toBeInTheDocument();
+  expect(screen.getByText(/Cached profile signal/)).toBeInTheDocument();
+  expect(api.planAudienceEnrichment).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Reload cached results' }));
+  await act(async () => {});
+  expect(api.planAudienceEnrichment).not.toHaveBeenCalled();
 });

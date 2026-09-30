@@ -1438,7 +1438,9 @@ test('route registration does not crash when Analyzer env is not configured', ()
       db: { queryOne: async () => null, exec: async () => {} },
       rbac: fakeRbac,
     }));
-    assert.equal(registrations.length, 17);
+    assert.equal(registrations.length, 19);
+    assert.equal(registrations.find(([, path]) => path === '/api/saivaree/audience-enrichment/plan')[2].permission, 'kol.read');
+    assert.equal(registrations.find(([, path]) => path === '/api/saivaree/audience-enrichment/execute')[2].permission, 'kol.update');
     assert.equal(registrations[0][2].permission, 'kol.read');
     assert.equal(registrations[1][2].permission, 'kol.update');
     assert.equal(

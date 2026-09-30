@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { cheapScreen } = require('./cheap-screen');
+const audienceModule = require('./audience-enrichment');
 const { classifyBuriramRelevance } = require('./buriram-relevance');
 const { createAnalyzerClient } = require('./analyzer-client');
 const { renderPersonalizedEmail } = require('../agents-v2/kol-outreach');
@@ -371,7 +372,20 @@ function safeAnalyzerError(error, fallback = 'Deep analysis request failed') {
   return { status: 500, body: { error: fallback, code: 'analyzer_request_failed' } };
 }
 
-function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }) {
+function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID, audienceDependencies = {} }) {
+  const audience = audienceModule.createAudienceEnrichment({
+    db, getRows: async workspaceId => (await mapRecommendations({ workspace: { id: workspaceId } }, await analyzer.getCreatorDiscovery())).creators,
+    apify: require('../apify-client'), quota: require('../apify-quota'),
+    harvest: require('../comment-harvest').harvestTikTokComments, cache: require('../kol-profile-cache'),
+    ...audienceDependencies,
+  });
+  const audienceHandler = method => async (req, res) => {
+    try { return res.json(await audience[method](req.workspace.id, req.body)); }
+    catch (error) { return res.status(error.status || 500).json({ error: error.status ? error.message : 'Unable to enrich audience', code: error.code || 'audience_failed' }); }
+  };
+  const createAudiencePlan = audienceHandler('plan');
+  const executeAudience = audienceHandler('execute');
+
   async function resolveMapping(workspaceId, kol) {
     let meta = await getSaivareeMeta(db, workspaceId, kol.id);
     if (meta?.saivaree_creator_id) return meta;
@@ -647,7 +661,13 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
 
   async function getCreatorDiscovery(req, res) {
     try {
-      return res.json(await mapRecommendations(req, await analyzer.getCreatorDiscovery()));
+      const mapped = await mapRecommendations(req, await analyzer.getCreatorDiscovery());
+      const cached = await audienceModule.loadCache(db, req.workspace.id, mapped.creators);
+      for (const row of mapped.creators) {
+        const hit = cached.get(audienceModule.cacheKey(req.workspace.id, row));
+        if (hit) row.audience_enrichment = hit;
+      }
+      return res.json(mapped);
     } catch (error) {
       const mapped = safeAnalyzerError(error, 'Unable to load creator discovery');
       return res.status(mapped.status).json(mapped.body);
@@ -929,6 +949,8 @@ function createSaivareeHandlers({ db, analyzer, randomUUID = crypto.randomUUID }
     refreshContactRecommendations,
     getCreatorDiscovery,
     bridgeCreatorDiscovery,
+    createAudiencePlan,
+    executeAudience,
     createDeepAnalysisPlan,
     executeDeepAnalysis,
     getDeepAnalysisJob,
@@ -944,9 +966,10 @@ function registerSaivareeIntelligenceRoutes(app, {
   rbac,
   analyzer,
   platformAdmin,
+  audienceDependencies,
 }) {
   const configuredAnalyzer = analyzer || createConfiguredAnalyzer();
-  const handlers = createSaivareeHandlers({ db, analyzer: configuredAnalyzer });
+  const handlers = createSaivareeHandlers({ db, analyzer: configuredAnalyzer, audienceDependencies });
 
   app.get(
     `${basePath}/api/saivaree/kols/:kolId/meta`,
@@ -1017,6 +1040,15 @@ function registerSaivareeIntelligenceRoutes(app, {
     `${basePath}/api/saivaree/deep-analysis/creators/:creatorRef`,
     rbac.requirePermission('kol.read'),
     handlers.getDeepAnalysisCreator
+  );
+
+  app.post(
+    `${basePath}/api/saivaree/audience-enrichment/plan`,
+    rbac.requirePermission('kol.read'), handlers.createAudiencePlan
+  );
+  app.post(
+    `${basePath}/api/saivaree/audience-enrichment/execute`,
+    rbac.requirePermission('kol.update'), handlers.executeAudience
   );
 
   const adminOnly = platformAdmin || ((req, res, next) => {

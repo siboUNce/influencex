@@ -51,6 +51,9 @@ export default function ContactRecommendations({
   const [pollEpoch, setPollEpoch] = useState(0);
   const [pollStopped, setPollStopped] = useState(false);
   const [rowActions, setRowActions] = useState({});
+  const [audiencePlans, setAudiencePlans] = useState({});
+  const [audienceResults, setAudienceResults] = useState({});
+  const audienceLocks = useRef(new Set());
   const [buriramOnly, setBuriramOnly] = useState(false);
   const mounted = useRef(false);
   const submitting = useRef(new Set());
@@ -73,6 +76,9 @@ export default function ContactRecommendations({
         const result = await api.getSaivareeCreatorDiscovery();
         if (!active) return;
         setData(result);
+        setAudienceResults(Object.fromEntries((result.creators || [])
+          .filter(row => row.audience_enrichment).map(row => [creatorKey(row), row.audience_enrichment])));
+
         for (const row of result.creators || []) {
           const key = creatorKey(row);
           if (pending.current.has(key) && ['deep_analyzed', 'decision_grade'].includes(row.candidate_tier)) {
@@ -120,6 +126,46 @@ export default function ContactRecommendations({
     } finally {
       submitting.current.delete(key);
     }
+  }
+
+  const canEnrichAudience = row => row.platform === 'tiktok' && row.cheap_screen?.status === 'shortlisted'
+    && typeof row.creator_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(row.creator_id);
+
+  async function planAudience(row) {
+    const key = creatorKey(row);
+    if (!canEnrichAudience(row) || audienceLocks.current.has(key)) return;
+    audienceLocks.current.add(key);
+    setRowActions(previous => ({ ...previous, ['audience:' + key]: 'submitting' }));
+    try {
+      const plan = await api.planAudienceEnrichment(row.creator_id);
+      if (!mounted.current) return;
+      setAudiencePlans(previous => ({ ...previous, [key]: plan }));
+      setRowActions(previous => ({ ...previous, ['audience:' + key]: null }));
+    } catch {
+      if (mounted.current) setRowActions(previous => ({ ...previous, ['audience:' + key]: 'error' }));
+    } finally { audienceLocks.current.delete(key); }
+  }
+
+  async function executeAudience(row) {
+    const key = creatorKey(row);
+    const plan = audiencePlans[key];
+    if (!canEnrichAudience(row) || !plan?.plan_token || audienceLocks.current.has(key)) return;
+    audienceLocks.current.add(key);
+    setRowActions(previous => ({ ...previous, ['audience:' + key]: 'submitting' }));
+    try {
+      const requestId = typeof globalThis.crypto?.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID() : 'audience-' + Date.now() + '-' + Math.random().toString(36).slice(2, 12);
+      const result = await api.executeAudienceEnrichment(row.creator_id, plan.plan_token, requestId);
+      if (!mounted.current) return;
+      setAudienceResults(previous => ({ ...previous, [key]: result.audience_enrichment }));
+      setAudiencePlans(previous => { const next = { ...previous }; delete next[key]; return next; });
+      setRowActions(previous => ({ ...previous, ['audience:' + key]: null }));
+    } catch {
+      if (mounted.current) {
+        setAudiencePlans(previous => { const next = { ...previous }; delete next[key]; return next; });
+        setRowActions(previous => ({ ...previous, ['audience:' + key]: 'error' }));
+      }
+    } finally { audienceLocks.current.delete(key); }
   }
 
   function openCreator(row) {
@@ -226,6 +272,10 @@ export default function ContactRecommendations({
                       const tier = candidateTier(row);
                       const state = row.enrichment_status;
                       const action = rowActions[creatorKey(row)];
+                      const audienceKey = creatorKey(row);
+                      const audiencePlan = audiencePlans[audienceKey];
+                      const audience = audienceResults[audienceKey];
+                      const audienceBusy = rowActions['audience:' + audienceKey] === 'submitting';
                       const sampleSize = metrics.sample_size ?? evidence.sample_size;
                       return (
                         <tr key={rowId(row)}>
@@ -290,6 +340,24 @@ export default function ContactRecommendations({
                             {action && <div role={action === 'error' ? 'alert' : 'status'} style={{ marginTop: 4, fontSize: 12 }}>
                               {t(`kol_db.discovery_action_${action}`)}
                             </div>}
+                            {canEnrichAudience(row) && !audience && !audiencePlan && <button type="button" className="btn btn-sm btn-secondary" disabled={audienceBusy} onClick={() => planAudience(row)}>{t('kol_db.audience_plan')}</button>}
+                            {canEnrichAudience(row) && audiencePlan && !audience && <div style={{ fontSize: 11, marginTop: 4 }}>
+                              <div>{t('kol_db.audience_plan_note', { posts: audiencePlan.max_posts, comments: audiencePlan.comments_per_post, runs: audiencePlan.max_provider_runs })}</div>
+                              <div>{t('kol_db.audience_cache_note', { state: audiencePlan.cache_state || '-' })}</div>
+                              {audiencePlan.quota_remaining?.global && <div>{t('kol_db.audience_quota_note', {
+                                runs: audiencePlan.quota_remaining.workspace?.runs ?? audiencePlan.quota_remaining.global.runs,
+                                items: audiencePlan.quota_remaining.workspace?.items ?? audiencePlan.quota_remaining.global.items,
+                              })}</div>}
+                              <button type="button" className="btn btn-sm btn-primary" disabled={audienceBusy} onClick={() => executeAudience(row)}>{t('kol_db.audience_confirm')}</button>
+                            </div>}
+                            {audience && <div style={{ fontSize: 11, marginTop: 4 }}>
+                              <div>{t('kol_db.audience_buriram')}: {audience.buriram_audience?.level || 'insufficient'} ({audience.buriram_audience?.confidence || 'insufficient'})</div>
+                              <div>{t('kol_db.audience_sample_note', { count: audience.buriram_audience?.sample_count ?? 0, posts: audience.buriram_audience?.posts_sampled ?? 0 })}</div>
+                              <div>{t('kol_db.audience_intent')}: {audience.commercial_intent?.level || 'insufficient'} ({audience.commercial_intent?.confidence || 'insufficient'})</div>
+                              <div>{t('kol_db.audience_intent_note', { count: audience.commercial_intent?.intent_comment_count ?? 0, sample: audience.commercial_intent?.sample_count ?? 0 })}</div>
+                              {(audience.evidence_lines || []).slice(0, 2).map((line, index) => <div key={index}>{line}</div>)}
+                            </div>}
+                            {rowActions['audience:' + audienceKey] === 'error' && <div role="alert" style={{ fontSize: 11 }}>{t('kol_db.audience_error')}</div>}
                             <button type="button" className="btn btn-sm btn-secondary" disabled={!row.kol_id && !safeProfile(row.profile_url)} onClick={() => openCreator(row)}>
                               {t('kol_db.contact_rec_open')}
                             </button>

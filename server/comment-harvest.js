@@ -39,6 +39,8 @@ function normalizeTtComment(item, videoUrl) {
     external_id: item.cid || item.id,
     author_handle: item.user?.uniqueId || item.user?.unique_id || '',
     author_name: item.user?.nickname || '',
+    public_author_bio: [item.user?.signature, item.user?.bio].filter(value => typeof value === 'string').join(' ').slice(0, 500),
+    public_author_locality: [item.user?.city, item.user?.region, item.user?.country, item.user?.locality].filter(value => typeof value === 'string').join(' ').slice(0, 300),
     body: item.text || '',
     created_at: item.create_time ? new Date(item.create_time * 1000).toISOString() : null,
     likes: item.digg_count || 0,
@@ -71,29 +73,37 @@ async function harvestInstagramComments({ postUrls, limitPerPost = 50, workspace
   return { success: true, comments: out };
 }
 
-async function harvestTikTokComments({ videoUrls, limitPerVideo = 50, workspaceId } = {}) {
+async function harvestTikTokComments({ videoUrls, limitPerVideo = 50, workspaceId, strict = false } = {}) {
   if (!apify.isConfigured()) return { success: false, error: 'APIFY_TOKEN not configured' };
   if (!Array.isArray(videoUrls) || videoUrls.length === 0) return { success: false, error: 'videoUrls required' };
 
+  if (strict) limitPerVideo = Math.min(30, Math.max(1, Number.isInteger(limitPerVideo) ? limitPerVideo : 30));
   const out = [];
-  for (const url of videoUrls.slice(0, 20)) {
+  const runs = [];
+  for (const url of [...new Set(videoUrls)].slice(0, strict ? 3 : 20)) {
     const check = quota.canCall(TT_ACTOR, limitPerVideo, workspaceId);
     if (!check.allowed) {
       console.warn(`[comment-harvest] TT harvest skipped — quota exhausted (${check.reason})`);
+      if (strict) return { success: false, code: 'quota_exceeded', comments: out, runs };
       break;
     }
     const r = await apify.runActor(TT_ACTOR, {
       postURLs: [url],
       commentsPerPost: limitPerVideo,
     }, { workspaceId });
-    if (!r.success) continue;
+    runs.push({ actor_id: TT_ACTOR, run_id: r.runId || null, success: r.success === true });
+    if (strict && !r.success) quota.record(TT_ACTOR, 0, workspaceId);
+    if (!r.success) {
+      if (strict) return { success: false, code: 'comment_provider_failed', comments: out, runs };
+      continue;
+    }
     quota.record(TT_ACTOR, r.items?.length || 0, workspaceId);
-    for (const it of r.items || []) {
+    for (const it of (r.items || []).slice(0, limitPerVideo)) {
       const norm = normalizeTtComment(it, url);
       if (norm) out.push(norm);
     }
   }
-  return { success: true, comments: out };
+  return { success: true, comments: out, runs };
 }
 
 module.exports = {

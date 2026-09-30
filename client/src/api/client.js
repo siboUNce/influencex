@@ -132,6 +132,15 @@ export const auth = {
 };
 
 export const api = {
+  // Audience enrichment is deliberately a two-step client flow. PLAN is
+  // provider-free; EXECUTE requires the caller to pass the exact token and a
+  // request id returned/created by the explicit confirmation action.
+  planAudienceEnrichment: (creator_ref) => request('/saivaree/audience-enrichment/plan', {
+    method: 'POST', body: { creator_ref },
+  }),
+  executeAudienceEnrichment: (creator_ref, plan_token, request_id) => request('/saivaree/audience-enrichment/execute', {
+    method: 'POST', body: { creator_ref, plan_token, request_id },
+  }),
   // Campaigns
   getCampaigns: () => request('/campaigns'),
   getCampaign: (id) => request(`/campaigns/${id}`),
